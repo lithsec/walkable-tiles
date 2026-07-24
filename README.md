@@ -60,7 +60,10 @@ walkable-tiles/
   v4/<latIdx>/<lngIdx>.json.gz   # one gzip-compressed v4 payload per data-bearing cell
 ```
 
-- Served at `https://tiles.example.com/v4/<latIdx>/<lngIdx>.json.gz`.
+- Served at `${TILES_HOST}/v4/<latIdx>/<lngIdx>.json.gz`, where `TILES_HOST` is the
+  Cloudflare custom domain in front of R2 — supplied to the app as a build-time env
+  var, never committed here. (The data is ODbL, so the host is operational config,
+  not a true secret.)
 - `Cache-Control: public, max-age=604800` (7 d). No purge needed — walkable infra
   barely moves, and the app's on-device cache is 60 d, so freshness is inherently
   loose (see below). Force freshness by bumping the path prefix (`v5/…`).

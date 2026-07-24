@@ -92,7 +92,7 @@ Single fetch-path swap in `apps/mobile/src/run/remote.ts`:
 ```
 walkableWaysRemote(pos):
   { latIdx, lngIdx } = split(tileKey(pos))
-  res = GET https://tiles.example.com/v4/${latIdx}/${lngIdx}.json.gz
+  res = GET ${TILES_HOST}/v4/${latIdx}/${lngIdx}.json.gz   // TILES_HOST = build-time env var
   if 404 -> return null (caller falls back to Overpass)
   payload = parse(res)          // full v4: ways + names + crossings
   return payload
