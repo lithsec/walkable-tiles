@@ -101,18 +101,60 @@ country/state extract fits a free runner's disk.
 slices.json                  # Geofabrik extracts × assigned day-of-month
 scripts/bake-slice.sh        # download → filter → tile → diff → upload
 scripts/tile.mjs             # OSM features → v4 tiles + gzip
+scripts/serve-local.mjs      # serve baked tiles locally like the CDN (dev only)
 LICENSE  NOTICE  DATA-LICENSE.md
 SPEC.md                      # matrix / scheduling / boundary / diff design
 ```
 
-## Running locally
+## Local development
+
+Nothing here needs the public repo or R2 to iterate — everything runs on your
+machine, and you only `git push` when you're happy. Fastest loop first.
+
+**1. Tile logic only (no osmium, sub-second).** Feed synthetic GeoJSON-Seq
+straight into the tiler:
 
 ```bash
-# One slice, dry-run (no upload):
-R2_DRY_RUN=1 ./scripts/bake-slice.sh \
-  https://download.geofabrik.de/north-america/us/massachusetts-latest.osm.pbf massachusetts
+printf '%s\n' \
+'{"type":"Feature","id":"w1","properties":{"highway":"footway","name":"River Path"},"geometry":{"type":"LineString","coordinates":[[-71.06,42.36],[-71.061,42.361]]}}' \
+'{"type":"Feature","id":"n9","properties":{"highway":"crossing"},"geometry":{"type":"Point","coordinates":[-71.0595,42.3595]}}' \
+| node scripts/tile.mjs --out ./out
+```
 
-# Real upload needs R2 creds in env:
+**2. Real data, dry-run (needs `osmium-tool` + `jq`; `brew install osmium-tool jq`).**
+Use a small dense extract like DC to keep it quick, and `OUT_DIR` to keep the tiles:
+
+```bash
+OUT_DIR=./out R2_DRY_RUN=1 ./scripts/bake-slice.sh \
+  https://download.geofabrik.de/north-america/us/district-of-columbia-latest.osm.pbf dc
+# even faster: clip a tiny bbox from any .pbf first —
+# osmium extract -b -71.07,42.35,-71.05,42.37 big.osm.pbf -o small.osm.pbf
+```
+
+**3. Full loop with the app.** Serve `./out` like the CDN, then point the app at it:
+
+```bash
+node scripts/serve-local.mjs ./out            # http://localhost:8788, gzip headers, 404 = empty
+# iOS simulator can use localhost; a real device on your LAN uses your Mac's IP.
+# In the app build:  EXPO_PUBLIC_TILES_HOST=http://localhost:8788
+```
+
+**4. Validate the workflow itself** (the matrix/plan logic) without pushing, via
+[`act`](https://github.com/nektos/act) (needs Docker):
+
+```bash
+act workflow_dispatch -W .github/workflows/bake.yml --input slice=dc
+```
+
+**Staging the real end-to-end (Actions + R2) privately.** A public repo can't hide
+its Actions runs, so if you want to rehearse the live upload before it's on public
+`main`, push to a throwaway **private** repo, run the workflow there with real R2
+secrets, then fast-forward the validated commit onto the public repo. For
+everything else, local dry-run + `serve-local.mjs` is enough.
+
+## Direct (upload) usage
+
+```bash
 export R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… R2_BUCKET=walkable-tiles
 ./scripts/bake-slice.sh <pbf-url> <slice-name>
 ```

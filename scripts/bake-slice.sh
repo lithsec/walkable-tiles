@@ -16,7 +16,9 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 PBF="$WORK/in.osm.pbf"
 FILTERED="$WORK/filtered.osm.pbf"
-OUT="$WORK/out"
+# OUT_DIR (optional) persists the built tiles outside the temp dir — set it for
+# local dev so you can `serve-local.mjs` the result. Default: throwaway temp.
+OUT="${OUT_DIR:-$WORK/out}"
 LOG="bake-$NAME.log"
 exec > >(tee -a "$LOG") 2>&1
 
@@ -51,7 +53,7 @@ BYTES=$(du -sb "$OUT/v4" 2>/dev/null | cut -f1 || echo 0)
 echo "[$NAME] built $TILES tiles ($BYTES bytes)"
 
 if [ "$DRY" = "1" ]; then
-  echo "[$NAME] R2_DRY_RUN=1 — skipping upload"
+  echo "[$NAME] R2_DRY_RUN=1 — skipping upload; tiles in $OUT/v4"
   cp "$OUT/hashes.json" "./hashes-$NAME.json"
   echo "[$NAME] === bake done (dry) ==="
   exit 0
