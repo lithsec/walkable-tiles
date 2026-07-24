@@ -1,0 +1,7 @@
+node_modules/
+bake-*.log
+hashes-*.json
+out/
+*.osm.pbf
+*.poly
+.DS_Store

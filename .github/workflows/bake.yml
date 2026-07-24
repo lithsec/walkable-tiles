@@ -1,0 +1,102 @@
+name: bake-tiles
+
+# Region-spread: runs daily, but each slice only bakes on its assigned
+# day-of-month (slices.json). Over a month the whole globe refreshes; any single
+# day only touches a slice of the planet, keeping each run small and fast.
+on:
+  schedule:
+    - cron: '17 3 * * *' # 03:17 UTC daily
+  workflow_dispatch:
+    inputs:
+      slice:
+        description: 'Bake a single slice now (name from slices.json), ignoring its day'
+        required: false
+        type: string
+      force_all:
+        description: 'Bake every slice regardless of assigned day'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: bake-tiles
+  cancel-in-progress: false # never interrupt an in-flight bake mid-upload
+
+permissions:
+  contents: read
+
+jobs:
+  # 1) Choose which slices bake today and emit them as a matrix.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      count: ${{ steps.pick.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pick
+        env:
+          INPUT_SLICE: ${{ inputs.slice }}
+          FORCE_ALL: ${{ inputs.force_all }}
+        run: |
+          DOM=$(date -u +%-d)   # day-of-month, 1..31
+          # Selection rules:
+          #   workflow_dispatch.slice   -> just that one
+          #   force_all                 -> every slice
+          #   otherwise                 -> slices whose "day" == today (clamped to 28)
+          jq -c \
+            --arg only "$INPUT_SLICE" \
+            --argjson dom "$DOM" \
+            --arg force "$FORCE_ALL" '
+            [ .[]
+              | select(
+                  ($only != "" and .name == $only)
+                  or ($only == "" and $force == "true")
+                  or ($only == "" and $force != "true" and (.day == (if $dom > 28 then 28 else $dom end)))
+                )
+            ]' slices.json > today.json
+          echo "count=$(jq length today.json)" >> "$GITHUB_OUTPUT"
+          echo "matrix={\"include\":$(cat today.json)}" >> "$GITHUB_OUTPUT"
+          jq -r '.[].name' today.json | sed 's/^/  baking: /'
+
+  # 2) One runner per slice, fully parallel (GitHub caps at ~20 concurrent).
+  bake:
+    needs: plan
+    if: ${{ needs.plan.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false # one slice failing must not abort the others
+      max-parallel: 16
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install osmium
+        run: sudo apt-get update && sudo apt-get install -y osmium-tool
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Free up disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
+          df -h /
+
+      - name: Bake ${{ matrix.name }}
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: ./scripts/bake-slice.sh "${{ matrix.url }}" "${{ matrix.name }}"
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bakelog-${{ matrix.name }}
+          path: bake-*.log
+          if-no-files-found: ignore
+          retention-days: 14

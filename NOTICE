@@ -1,0 +1,22 @@
+walkable-tiles
+Copyright 2026 Shawn Stone
+
+This product includes software developed as part of the walkable-tiles project,
+licensed under the Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------------
+Data attribution (NOT covered by the Apache License above)
+--------------------------------------------------------------------------------
+
+The tiles produced by this pipeline are derived from OpenStreetMap.
+
+  © OpenStreetMap contributors
+
+OpenStreetMap data is made available under the Open Database License (ODbL) 1.0:
+  https://opendatacommons.org/licenses/odbl/1-0/
+
+The produced tile database is a Derivative Database of OpenStreetMap and is
+therefore itself licensed under ODbL 1.0. See DATA-LICENSE.md for details.
+
+The Apache License covers only the *code* in this repository. It does NOT and
+cannot relicense the OpenStreetMap-derived tile data, which remains under ODbL.
