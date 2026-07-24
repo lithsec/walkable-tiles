@@ -104,6 +104,7 @@ scripts/tile.mjs             # OSM features → v4 tiles + gzip
 scripts/serve-local.mjs      # serve baked tiles locally like the CDN (dev only)
 LICENSE  NOTICE  DATA-LICENSE.md
 SPEC.md                      # matrix / scheduling / boundary / diff design
+HOSTING.md                   # cost model + Cloudflare abuse hardening
 ```
 
 ## Local development
