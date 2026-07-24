@@ -87,24 +87,29 @@ of tiles → Class-A writes stay negligible even re-baking the planet.
 
 ## 6. App wiring (the client half)
 
-Single fetch-path swap in `apps/mobile/src/run/remote.ts`:
+Implemented in `apps/mobile/src/run/osm.ts`. The app wants everything within
+`BOX_HALF_M` (1200 m) of the runner; that box spans a 2–3 cell block, so the
+client fetches the covering cells and merges them (baked tiles overlap at seams,
+so the same way appears in adjacent cells — deduped on endpoints + length):
 
 ```
-walkableWaysRemote(pos):
-  { latIdx, lngIdx } = split(tileKey(pos))
-  res = GET ${TILES_HOST}/v4/${latIdx}/${lngIdx}.json.gz   // TILES_HOST = build-time env var
-  if 404 -> return null (caller falls back to Overpass)
-  payload = parse(res)          // full v4: ways + names + crossings
-  return payload
+loadTilePayload(pos, box):
+  if TILES_HOST unset -> skip to PostGIS/Overpass          // env var gates the whole path
+  cells = every 0.01° cell the box touches
+  tiles = fetch ${TILES_HOST}/v4/<i>/<j>.json.gz for each  // bounded concurrency
+          404 -> empty cell (not an error);  other non-OK -> that cell errors
+  if every cell errored -> null (real miss) -> PostGIS -> Overpass
+  else -> merge + dedupe ways/names/crossings
 ```
 
-Then `ensureCoverage` in `osm.ts` uses the payload's `names` + `crossings`
-directly instead of the current `names:null, crossings:[]` it fills for the
-ways-only RPC — so **remote tiles finally carry crossings**, and the coverage map
-+ jaywalk/crossing-safety overlays work everywhere, not just where Overpass ran.
-Keep the 60 d on-device `osm_cache` and `tileKey` unchanged. Gate behind a flag
-(`EXPO_PUBLIC_TILES_R2` / a remote config) so R2 and Overpass can be A/B'd per
-region during rollout.
+Chain: **pre-baked tiles → PostGIS RPC → Overpass**, first non-empty wins. Tiles
+carry `names` + `crossings` (the RPC doesn't), so **remote data finally has
+crossings** — the coverage map + jaywalk/crossing-safety overlays work everywhere,
+not just where Overpass ran. It's a plain `fetch` (gzip auto-decoded), independent
+of the dormant Supabase backend, so it works in fully-offline builds. `TILES_HOST`
+is a build-time env var — unset = feature off (pure Overpass/PostGIS), so tiles
+roll out per-build with no code change. The 60 d on-device `osm_cache` and
+`tileKey` are unchanged.
 
 ## 7. Secrets
 
