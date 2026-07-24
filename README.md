@@ -99,6 +99,8 @@ country/state extract fits a free runner's disk.
 ```
 .github/workflows/bake.yml   # the daily matrix workflow (see SPEC.md)
 slices.json                  # Geofabrik extracts × assigned day-of-month
+scripts/gen-slices.mjs       # generate a whole-world slice list from Geofabrik's index
+scripts/bake-all.sh          # one-time local seed: bake every slice → R2 (resumable)
 scripts/bake-slice.sh        # download → filter → tile → diff → upload
 scripts/tile.mjs             # OSM features → v4 tiles + gzip
 scripts/serve-local.mjs      # serve baked tiles locally like the CDN (dev only)
@@ -159,6 +161,38 @@ everything else, local dry-run + `serve-local.mjs` is enough.
 export R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… R2_BUCKET=walkable-tiles
 ./scripts/bake-slice.sh <pbf-url> <slice-name>
 ```
+
+## Whole-world first upload (local seed)
+
+Rather than waiting a full month for the day-spread CI to trickle in global coverage,
+seed the entire world once from your machine, then let the schedule keep it fresh.
+CI needs no change: `bake-slice.sh` diffs each slice against the hash manifests this
+seed writes to R2, so subsequent scheduled runs upload only real OSM changes.
+
+```bash
+# 1. Generate the world slice list (leaf Geofabrik extracts, ~500 regions).
+node scripts/gen-slices.mjs > slices.world.json
+
+# 2. Seed everything to R2 — resumable, bounded concurrency. Hours to run.
+export R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… R2_BUCKET=walkable-tiles
+JOBS=3 ./scripts/bake-all.sh slices.world.json
+#   re-run to retry any failed slices (finished ones are skipped via .bake-state/)
+```
+
+Point CI at the same coverage: replace `slices.json` with `slices.world.json` (or
+commit the generated list as `slices.json`) so the daily matrix refreshes the whole
+world across the month.
+
+Notes:
+- **Needs `osmium-tool jq awscli` locally** (`brew install osmium-tool jq awscli`) plus Node.
+- **One-time write cost.** The first upload writes every tile (~5–10 M objects) — R2
+  Class-A writes at $4.50/M (1 M free) ≈ **$25–45, once**. Storage/reads/egress after
+  are cents (see `HOSTING.md`). Same cost whether seeded locally or by CI.
+- **Bandwidth + politeness.** Keep `JOBS` low (≤3–4); this pulls hundreds of extracts
+  from Geofabrik. Each slice's `.pbf` is deleted after tiling.
+- **A few giant leaf regions** may need more heap; `bake-slice.sh` runs Node with
+  `--max-old-space-size=12288`. If one OOMs it's marked failed — split it into
+  smaller Geofabrik sub-extracts in `slices.world.json` and re-run.
 
 ## App wiring
 

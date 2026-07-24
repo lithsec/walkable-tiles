@@ -49,7 +49,9 @@ osmium export "$FILTERED" -f geojsonseq --add-unique-id=type_id -o - \
   | node --max-old-space-size=12288 "$(dirname "$0")/tile.mjs" --out "$OUT" "${POLY_ARG[@]}"
 
 TILES=$(find "$OUT/v4" -name '*.json.gz' 2>/dev/null | wc -l | tr -d ' ')
-BYTES=$(du -sb "$OUT/v4" 2>/dev/null | cut -f1 || echo 0)
+# Portable byte sum (BSD `du` has no -b): concat all tiles and count bytes.
+BYTES=$(find "$OUT/v4" -type f -name '*.json.gz' -print0 2>/dev/null | xargs -0 cat 2>/dev/null | wc -c | tr -d ' ')
+BYTES=${BYTES:-0}
 echo "[$NAME] built $TILES tiles ($BYTES bytes)"
 
 if [ "$DRY" = "1" ]; then
