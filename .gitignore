@@ -5,3 +5,7 @@ out/
 *.osm.pbf
 *.poly
 .DS_Store
+
+# Local multi-slice bake driver output (transient).
+states-bake.log
+bake-*.log
