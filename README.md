@@ -5,6 +5,11 @@ crossings** from OpenStreetMap into small static tiles, uploaded to
 **Cloudflare R2** and served through a CDN. The app fetches one tile per
 location instead of hitting a live PostGIS/Overpass backend.
 
+Two consumers, two formats from one bake pass: **v4** (Cologra, shipping —
+frozen, byte-identical) and **v5** (Ausculta — v4 plus landcover polygons,
+capped named landmarks, and a per-spawn-cell habitat class grid; see
+`SPEC.md §10`).
+
 - **Zero serve-egress** (R2 behind Cloudflare).
 - **Zero compute cost** — the bake runs entirely on free GitHub-hosted runners
   (this repo is public → unlimited Actions minutes).
@@ -43,6 +48,11 @@ so tiles are a drop-in for the live fetch path.
 track|living_street`) vs a shared road (`residential|service|unclassified`).
 `crossings` = `highway=crossing` nodes plus `footway=crossing` way midpoints.
 
+**Payload — v5** = the v4 payload (identical keys, same code path) + top-level
+`landcover`, `landmarks`, `habitat`, with `v: 5` — additive, so a v4 parser
+pointed at a v5 tile still finds its ways. Format, classes, and the normative
+habitat-classifier thresholds are specified in `SPEC.md §10`.
+
 Baking to the **cell center** (not a runner's exact position) makes every tile
 deterministic and cacheable. Because the 1200 m box overspills the 1.1 km cell,
 a way near a boundary lands in ~4 neighboring tiles — accepted duplication
@@ -55,9 +65,12 @@ a way near a boundary lands in ~4 neighboring tiles — accepted duplication
 
 ```
 walkable-tiles/
-  v4/build/<slice>.json      # per-slice last-baked timestamp, tile/changed counts, bytes
+  v4/build/<slice>.json      # per-slice last-baked timestamp, tile/changed counts, bytes (v4 + v5)
   v4/hashes/<slice>.json     # content hash per tile from the last build (diff input)
   v4/<latIdx>/<lngIdx>.json.gz   # one gzip-compressed v4 payload per data-bearing cell
+  v5/hashes/<slice>.json     # same diff manifest, v5 tiles
+  v5/habitat/<slice>.jsonl   # habitat sidecar — non-rural spawn cells (SPEC.md §10.4)
+  v5/<latIdx>/<lngIdx>.json.gz   # v5 payload; v5-only cells exist (landcover with no ways)
 ```
 
 - Served at `${TILES_HOST}/v4/<latIdx>/<lngIdx>.json.gz`, where `TILES_HOST` is the

@@ -17,9 +17,9 @@ const server = http.createServer(async (req, res) => {
   const cors = { 'access-control-allow-origin': '*' };
   try {
     const { pathname } = new URL(req.url, 'http://local');
-    // Confine to /v4/**/*.json.gz; strip any ../ traversal.
+    // Confine to /v4/**/*.json.gz and /v5/**/*.json.gz; strip any ../ traversal.
     const rel = normalize(pathname).replace(/^(\.\.(\/|\\|$))+/, '');
-    if (!rel.startsWith('/v4/') || !rel.endsWith('.json.gz')) {
+    if (!(rel.startsWith('/v4/') || rel.startsWith('/v5/')) || !rel.endsWith('.json.gz')) {
       res.writeHead(404, cors).end();
       return;
     }
@@ -37,5 +37,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`serving ${ROOT}/v4 on http://localhost:${PORT}  (404 = no tile for that cell)`);
+  console.log(`serving ${ROOT}/v4 + ${ROOT}/v5 on http://localhost:${PORT}  (404 = no tile for that cell)`);
 });
