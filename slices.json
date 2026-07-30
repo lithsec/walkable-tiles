@@ -5,6 +5,11 @@
     "day": 1
   },
   {
+    "name": "vermont",
+    "url": "https://download.geofabrik.de/north-america/us/vermont-latest.osm.pbf",
+    "day": 1
+  },
+  {
     "name": "massachusetts",
     "url": "https://download.geofabrik.de/north-america/us/massachusetts-latest.osm.pbf",
     "day": 1
