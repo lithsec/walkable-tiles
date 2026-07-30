@@ -9,3 +9,4 @@ out/
 # Local multi-slice bake driver output (transient).
 states-bake.log
 bake-*.log
+.bake-state/
