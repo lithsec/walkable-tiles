@@ -42,8 +42,20 @@ const cellOf = (lat, lng) => [Math.floor(lat / TILE_DEG), Math.floor(lng / TILE_
 // not one. Open sea works because OSM has no ocean polygon; an unbaked region works
 // because nothing was written at all. Probes over mapped lakes stay v4-only.
 //
-// Landmarks are deliberately not asserted: SPEC §10.2 caps them at 3 per tile and a
-// legitimately dense cell can carry zero named parks or libraries.
+// A probe may carry a 7th element, `want` — a VALUE assertion about the v5 terrain layers
+// of that cell (ignored for v4, which has none). This is how a new tile field gets a
+// checker BEFORE it exists: the probe is added red and goes green when the bake lands.
+//   want.landmark  { kind | kindIn, nameIncludes, eleMin, eleMax }
+//                  at least one landmark must match every field given.
+//   want.attrWays  at least this many ways must carry `lit` or `access` (SPEC §10.6).
+//   want.habitatHas / want.habitatLacks
+//                  characters that must / must not appear in `habitat.cells` (SPEC §10.3).
+//
+// Landmarks were deliberately NOT asserted before revision 2, because §10.2 capped them at
+// 3 per tile sorted by footprint and a legitimately dense cell can carry zero named parks.
+// Revision 2's tiering is what makes them assertable: a settlement, a peak or a national
+// park now outranks the local parks in the cell that contains it, so its absence is a
+// pipeline fault rather than a plausible ranking outcome.
 const PROBES = [
   // slice, label, lat, lng, expect, versions
   ['massachusetts', 'downtown Boston', 42.3601, -71.0589, 'dense', ['v4', 'v5']],
@@ -82,6 +94,70 @@ const PROBES = [
   ['kansas', 'downtown Wichita', 37.6872, -97.3301, 'dense', ['v4', 'v5']],
   ['kansas', 'downtown Topeka', 39.0473, -95.6752, 'dense', ['v4', 'v5']],
   ['kansas', 'Gove County farmland', 38.75, -100.55, 'sparse', ['v4', 'v5']],
+
+  // ── REVISION 2 FIELDS: settlements, peaks, national parks, per-way lit/access ────────
+  //
+  // These are RED until the re-bake lands, on purpose and for the same reason the arizona/
+  // florida/kansas v5 probes above were added red: a verifier that only probes what already
+  // exists passes vacuously for the exact run it would be used to check. It passed 27/27
+  // while three whole states had no v5 at all.
+  //
+  // Every cell below already returns 200 today (checked), so the failure when you run this
+  // now is the `want` assertion — the field is genuinely absent, not the tile.
+  //
+  // `expect: 'any'` means "must be served, must be the right version, must satisfy `want`"
+  // with NO way/geometry floor. A summit cell or the interior of a national park is thin
+  // by nature; asserting density there would be asserting a lie about the terrain, the same
+  // reason `sparse` carries no volume floor.
+
+  // Settlement names — the field with no substitute today. Both are `place=city` NODES
+  // sitting inside their own downtown cell, and both cells currently list three city parks
+  // and nothing else, which is exactly the truncation §10.2's tiering fixes.
+  ['kansas', 'Wichita is named in its own downtown cell', 37.6872, -97.3301, 'dense', ['v5'],
+    { landmark: { kind: 'city', nameIncludes: 'Wichita' } }],
+  ['massachusetts', 'Boston is named in its own downtown cell', 42.3601, -71.0589, 'dense', ['v5'],
+    { landmark: { kind: 'city', nameIncludes: 'Boston' } }],
+
+  // A named summit WITH its elevation. `ele` is checked against a range, not a value: it is
+  // the mountain classifier's free calibration set, and a calibration set with a wrong
+  // number in it is worse than a smaller one. Mount Timpanogos is 3581 m. The cell already
+  // lists "Mount Timpanogos Wilderness" as a nature_reserve, so `kind: 'peak'` is what
+  // distinguishes the summit node from the protected area around it.
+  ['utah', 'Mount Timpanogos summit carries name + ele', 40.3907, -111.6457, 'any', ['v5'],
+    { landmark: { kind: 'peak', nameIncludes: 'Timpanogos', eleMin: 3000, eleMax: 4000 } }],
+
+  // National parks, probed from DEEP INSIDE rather than near the centroid — that is the
+  // half of §10.2 that containment binning adds. Both parks are already in today's filter
+  // (`leisure=nature_reserve` matches them) and both these cells list ZERO landmarks today.
+  // `kindIn` accepts either bucket because the national_park/protected_area split turns on
+  // tags that individual parks are inconsistent about.
+  ['florida', 'Everglades NP named 6 km inside it (Royal Palm)', 25.382, -80.609, 'any', ['v5'],
+    { landmark: { kindIn: ['national_park', 'protected_area'], nameIncludes: 'Everglades' } }],
+  ['arizona', 'Grand Canyon NP named inside it (the Village)', 36.0544, -112.1401, 'any', ['v5'],
+    { landmark: { kindIn: ['national_park', 'protected_area'], nameIncludes: 'Grand Canyon' } }],
+
+  // Per-way `lit`/`access`. The floor is ONE way in a 1200 m radius of a downtown, across
+  // three different cities — enough to prove the channel is populated, and deliberately not
+  // a coverage percentage. OSM `lit` coverage in the US is genuinely thin, so a percentage
+  // floor would be this verifier asserting a lie about the data rather than about the bake.
+  ['massachusetts', 'Boston ways carry lit/access', 42.3601, -71.0589, 'dense', ['v5'], { attrWays: 1 }],
+  ['florida', 'Miami ways carry lit/access', 25.7617, -80.1918, 'dense', ['v5'], { attrWays: 1 }],
+  ['utah', 'Salt Lake City ways carry lit/access', 40.7608, -111.891, 'dense', ['v5'], { attrWays: 1 }],
+
+  // The habitat split (SPEC §10.3/§10.4): `g` retired, `w` woodland, `s` greenspace.
+  // Each cell below was read off the LIVE grid before the probe was written, so the
+  // expectation is grounded in the tile that exists rather than in a hope about one:
+  //   Blue Hills Reservation      50 `g` cells, landcover carries `wood`  -> must yield `w`
+  //   Boston Common / Public Gdn  19 `g` cells, landcover has NO `wood`   -> must yield `s`
+  //   Liberty Park, Salt Lake     27 `g` cells, landcover has NO `wood`   -> must yield `s`
+  // `habitatLacks: 'g'` is the retirement proof, and it is the assertion that would catch
+  // the one mistake that really matters here: re-spending `g` for one of the two halves.
+  ['massachusetts', 'Blue Hills reads as woodland', 42.2115, -71.085, 'any', ['v5'],
+    { habitatHas: 'w', habitatLacks: 'g' }],
+  ['massachusetts', 'Boston Common reads as greenspace', 42.355, -71.0656, 'dense', ['v5'],
+    { habitatHas: 's', habitatLacks: 'g' }],
+  ['utah', 'Liberty Park reads as greenspace', 40.746, -111.876, 'any', ['v5'],
+    { habitatHas: 's', habitatLacks: 'g' }],
 ];
 
 const FLOORS = { ways: 200, named: 20, crossings: 50, ptsInCell: 100 };
@@ -118,12 +194,44 @@ async function probe(ver, lat, lng) {
     named: (tile.names ?? []).filter(Boolean).length,
     crossings: (tile.crossings ?? []).length,
     landcover: (tile.landcover ?? []).length,
+    landmarks: tile.landmarks ?? [],
+    habitatCells: tile.habitat?.cells ?? '',
+    // SPEC §10.6 — a way carries these only when OSM tagged them, so counting the ways
+    // that have EITHER is the cheapest proof the channel exists at all.
+    attrWays: ways.filter((w) => w.lit !== undefined || w.access !== undefined).length,
     ptsInCell,
     sampleName: (tile.names ?? []).find(Boolean) ?? null,
   };
 }
 
-function judge(expect, ver, r) {
+// Does any landmark in the tile match every field of `w`? Returns the reason it did not,
+// or null. Names are matched by SUBSTRING: "Mount Timpanogos" vs "Mt. Timpanogos" is an
+// OSM editorial choice this checker has no business failing on, but the substring is still
+// something only the real feature can produce.
+function landmarkMiss(landmarks, w) {
+  const kinds = w.kindIn ?? (w.kind ? [w.kind] : null);
+  const hit = landmarks.find(
+    (lm) =>
+      (!kinds || kinds.includes(lm.kind)) &&
+      (!w.nameIncludes || (typeof lm.name === 'string' && lm.name.includes(w.nameIncludes))) &&
+      (w.eleMin === undefined || (typeof lm.ele === 'number' && lm.ele >= w.eleMin)) &&
+      (w.eleMax === undefined || (typeof lm.ele === 'number' && lm.ele <= w.eleMax)),
+  );
+  if (hit) return null;
+  const want = [
+    kinds ? `kind ${kinds.join('|')}` : null,
+    w.nameIncludes ? `name ~ "${w.nameIncludes}"` : null,
+    w.eleMin !== undefined || w.eleMax !== undefined ? `ele ${w.eleMin ?? '-'}..${w.eleMax ?? '-'}` : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
+  const got = landmarks.length
+    ? landmarks.map((lm) => `${lm.kind}:${lm.name}${lm.ele !== undefined ? `@${lm.ele}` : ''}`).join(' / ')
+    : '(none)';
+  return `no landmark matching {${want}} — tile has ${got}`;
+}
+
+function judge(expect, ver, r, want) {
   const bad = [];
   if (expect === 'empty') {
     if (r.status !== 404) bad.push(`expected 404 (no data here), got ${r.status}`);
@@ -139,6 +247,28 @@ function judge(expect, ver, r) {
   }
   const wantV = ver === 'v5' ? 5 : 4;
   if (r.v !== wantV) bad.push(`payload says v=${r.v}, expected v=${wantV}`);
+  // Field probes (`any`) carry no volume floor — see the PROBES header.
+  if (want && ver === 'v5') {
+    if (want.landmark) {
+      const miss = landmarkMiss(r.landmarks, want.landmark);
+      if (miss) bad.push(miss);
+    }
+    if (want.attrWays !== undefined && r.attrWays < want.attrWays) {
+      bad.push(`ways carrying lit/access ${r.attrWays} < ${want.attrWays} (SPEC §10.6 field absent)`);
+    }
+    const tally = () => {
+      const n = {};
+      for (const ch of r.habitatCells) n[ch] = (n[ch] ?? 0) + 1;
+      return JSON.stringify(n);
+    };
+    for (const ch of want.habitatHas ?? '') {
+      if (!r.habitatCells.includes(ch)) bad.push(`habitat grid has no '${ch}' cell — grid is ${tally()}`);
+    }
+    for (const ch of want.habitatLacks ?? '') {
+      if (r.habitatCells.includes(ch)) bad.push(`habitat grid still contains retired '${ch}' — grid is ${tally()}`);
+    }
+  }
+  if (expect === 'any') return bad;
   if (r.ways < 1) bad.push('zero ways — served a 200 with no content');
   // Geometry must land in the cell it was served for. Catches a mis-keyed bake,
   // which no byte-count check can see.
@@ -158,11 +288,11 @@ function judge(expect, ver, r) {
 const results = [];
 let failed = 0;
 
-for (const [slice, label, lat, lng, expect, versions] of PROBES) {
+for (const [slice, label, lat, lng, expect, versions, want] of PROBES) {
   if (onlySlice && slice !== onlySlice) continue;
   for (const ver of versions) {
     const r = await probe(ver, lat, lng);
-    const bad = judge(expect, ver, r);
+    const bad = judge(expect, ver, r, want);
     if (bad.length) failed++;
     results.push({ slice, label, ver, expect, ...r, problems: bad });
     if (!asJson) {
@@ -171,7 +301,7 @@ for (const [slice, label, lat, lng, expect, versions] of PROBES) {
         r.status === 404
           ? '404'
           : `${r.bytes}B ways=${r.ways} named=${r.named} xings=${r.crossings}` +
-            (ver === 'v5' ? ` landcover=${r.landcover}` : '') +
+            (ver === 'v5' ? ` landcover=${r.landcover} lm=${r.landmarks.length} litAcc=${r.attrWays}` : '') +
             ` inCell=${r.ptsInCell}` +
             (r.sampleName ? ` "${r.sampleName}"` : '');
       console.log(`${tag} ${slice}/${ver} ${label} [${expect}] ${r.i}/${r.j}  ${detail}`);

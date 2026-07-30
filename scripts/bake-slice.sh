@@ -65,9 +65,21 @@ else
 fi
 
 echo "[$NAME] tags-filter"
-# Line filters feed v4 (unchanged); the a/ (area) + library filters feed v5's
+# Line filters feed v4 (unchanged); the a/ (area) + n/ filters feed v5's
 # landcover/landmarks/habitat. Superset filter -> the v4 objects and their export
 # are untouched, so v4 tiles stay byte-identical.
+#
+# ── WHAT IS *NOT* HERE, AND WHY ────────────────────────────────────────────────────────
+# `lit` and `access` (SPEC §10.6) have NO filter line and need none. `tags-filter` SELECTS
+# objects and keeps every tag on the ones it selects, so both tags already arrive on every
+# way the `w/highway=` line matched. They were never missing from the extract — only from
+# the tiler's output. Adding a `w/lit=*` line would only widen the selection to ways we do
+# not walk.
+#
+# `boundary=administrative` is deliberately absent too: it is the only thing that would
+# give a settlement's true EXTENT, and it is a relation-heavy geometry class an order
+# larger than everything else here. Settlements are carried as their centre NODE with a
+# documented proximity radius instead — SPEC §10.2 says so rather than implying membership.
 osmium tags-filter --overwrite -o "$FILTERED" "$PBF" \
   w/highway=footway,path,pedestrian,steps,track,living_street,residential,service,unclassified \
   n/highway=crossing \
@@ -77,7 +89,10 @@ osmium tags-filter --overwrite -o "$FILTERED" "$PBF" \
   a/landuse=forest,reservoir,basin,grass,meadow,recreation_ground,village_green,farmland,farmyard,orchard,cemetery \
   a/leisure=park,garden,common,nature_reserve \
   a/amenity=library \
-  n/amenity=library
+  n/amenity=library \
+  n/place=city,town,village,hamlet,suburb \
+  n/natural=peak \
+  a/boundary=national_park,protected_area
 
 echo "[$NAME] export + tile"
 mkdir -p "$OUT"

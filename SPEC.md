@@ -188,12 +188,41 @@ unchanged.
 ```jsonc
 {
   "v": 5,
-  "ways": …, "names": …, "crossings": …,        // exactly v4's payload
+  "ways": …, "names": …, "crossings": …,        // exactly v4's payload, plus the
+  //                                               optional per-way `lit`/`access` of §10.6
   "landcover": [ { "kind": "wood", "rings": [ [ {"lat":…,"lng":…}, … ], … ] }, … ],
-  "landmarks": [ { "name": "Boston Common", "lat": 42.3550, "lng": -71.0656, "kind": "park" }, … ],
-  "habitat":   { "cellDeg": 0.0015, "cx0": …, "cy0": …, "cols": 7, "rows": 8, "cells": "uur.g…" }
+  "landmarks": [ { "name": "Boston Common", "lat": 42.3550, "lng": -71.0656, "kind": "park" },
+                 { "name": "Wichita", "lat": 37.6889, "lng": -97.3361, "kind": "city" },
+                 { "name": "Mount Timpanogos", "lat": 40.3907, "lng": -111.6457,
+                   "kind": "peak", "ele": 3581 }, … ],
+  "habitat":   { "cellDeg": 0.0015, "cx0": …, "cy0": …, "cols": 7, "rows": 8, "cells": "uur.ws…" }
 }
 ```
+
+### 10.0 Revision 2 (2026-07) — still `v: 5`, and why
+
+Revision 2 adds eight landmark kinds (§10.2), an optional `ele` on a landmark, two optional
+per-way attributes (§10.6), and **splits the `green` habitat class into `woodland` and
+`greenspace`** (§10.3, §10.4). Nothing is removed and no key changes meaning, so **the
+version is not bumped** — this is additive over revision 1 in exactly the way v5 was
+additive over v4. A revision-1 client skips landmark kinds it does not know (its parser
+already whitelists), ignores way keys it does not read, and decodes an unknown habitat
+character to nothing. Three behaviour changes such a client *will* see, all degradation
+rather than breakage:
+
+- `LANDMARKS_PER_TILE` rises 3 → 6. A revision-1 client that defensively clamps at 3 keeps
+  the first three kinds it RECOGNISES, which are the same parks it lists today.
+- A protected area also tagged `leisure=nature_reserve` now classifies as `national_park`
+  or `protected_area` instead of `nature_reserve` (§10.2 — every US national park checked
+  is tagged this way). A revision-1 client skips the unknown kind and falls through.
+- The habitat grid character `g` no longer appears; `w` and `p` replace it (§10.3). A
+  revision-1 client reads both as unknown and the cell falls back to rural — it
+  under-claims rather than mis-claims, which is why `g` is retired rather than re-spent.
+
+Revision-1 tiles stay valid `v: 5` and parse unchanged, so the two revisions coexist on the
+CDN for as long as any slice goes un-rebaked. **The reason to bake revision 2 into every
+field at once is that a tile is baked whole:** a field discovered missing later costs the
+entire bake again, and the bake gets an order more expensive with every slice added.
 
 Layout mirrors v4 everywhere: tiles at `v5/<latIdx>/<lngIdx>.json.gz`, hash
 manifests at `v5/hashes/<slice>.json`, plus one new slice-level artifact —
@@ -228,15 +257,69 @@ Processing (values normative):
   with the even-odd fill rule. Entries are ordered by clipped area descending,
   so big washes paint first.
 
-### 10.2 `landmarks` — at most 3 named places per tile
+### 10.2 `landmarks` — at most 6 named places per tile
 
-Whitelist: `leisure=park` → `park`, `amenity=library` → `library`,
-`landuse=cemetery` → `cemetery`, `leisure=nature_reserve` → `nature_reserve`,
-`leisure=common` → `common`. Only **named** features qualify; `name` is
-verbatim OSM. Position is the polygon centroid (or the node itself for
-point-mapped libraries). A tile lists every whitelisted landmark within its
-1200 m box, deduped on `(kind, name)`, sorted by footprint area descending
-(name ascending on ties), truncated to **3** (`LANDMARKS_PER_TILE`).
+Only **named** features qualify; `name` is verbatim OSM. An entry is
+`{name, lat, lng, kind}`, plus `ele` (integer metres) on a `peak` that carries a
+parseable `ele` tag.
+
+**Vocabulary and tier.** The `kind` whitelist, with its TIER — the first sort key inside a
+tile. Matching is in this table's order, most specific tag first:
+
+| kind | tier | OSM |
+|---|---|---|
+| `city`, `town` | 0 | `place=city\|town` (NODE) |
+| `village`, `hamlet`, `suburb` | 1 | `place=village\|hamlet\|suburb` (NODE) |
+| `peak` | 2 | `natural=peak` (NODE), with `ele` when tagged |
+| `national_park` | 3 | `boundary=national_park`, **or** `boundary=protected_area` with `protect_class=2` or `protected_area=national_park` |
+| `protected_area` | 3 | `boundary=protected_area` otherwise |
+| `park` | 4 | `leisure=park` |
+| `library` | 4 | `amenity=library` (area or NODE) |
+| `cemetery` | 4 | `landuse=cemetery` |
+| `nature_reserve` | 4 | `leisure=nature_reserve` |
+| `common` | 4 | `leisure=common` |
+
+The `boundary` rows sit ABOVE `leisure` deliberately. Everglades, Grand Canyon and Zion
+are all tagged `boundary=protected_area` + `leisure=nature_reserve`, and **none** carries
+`boundary=national_park` — a `leisure` test placed first quietly classes every US national
+park as a local nature reserve. `protect_class=2` is IUCN category II ("National Park");
+Grand Canyon has only `protected_area=national_park`, so both signals are needed.
+
+**Position.** The node itself for point-mapped kinds (settlements, peaks, some libraries);
+the largest part's polygon centroid for area kinds.
+
+**Which tiles list it.** The union of two rules:
+
+- **Proximity** — every tile whose centre is within `R` of the label point. `R` is
+  `BOX_HALF_M` (1200 m) for everything except settlements, which use
+  `PLACE_RADIUS_M`: city **8000 m**, town **4000 m**, village/suburb **2000 m**,
+  hamlet **1200 m**. This is proximity to the settlement's centre NODE and **is not a
+  claim of membership** — OSM maps a settlement's extent as `boundary=administrative`,
+  which this bake deliberately does not carry (§10, filter note). A flat 1200 m would make
+  a settlement almost always a false negative: a walk can stay inside a city all day and
+  never pass within 1.2 km of its centre node.
+- **Containment** — for area kinds, every tile whose centre falls inside the feature's own
+  (simplified, even-odd) rings. Proximity alone is right for a town park, smaller than the
+  1200 m box, and useless for a national park: measured on the live v5 bake, the tile over
+  Royal Palm — 6 km inside Everglades National Park — carries **zero** landmarks, even
+  though the park is already in the osmium filter. It was never missing; it was only ever
+  listed within 1200 m of a centroid that sits in open sawgrass. Bounded at
+  `LM_COVER_MAX_CELLS` = 200,000 candidate tiles (~a 500 km square); a polygon past that is
+  a mapping artefact, not a place, and falls back to proximity alone.
+
+**Ordering and truncation.** Deduped on `(kind, name)` keeping the largest footprint, then
+sorted by **tier ascending, footprint area descending, distance to the tile centre
+ascending, name ascending**, and truncated to **6** (`LANDMARKS_PER_TILE`). At most
+**2** (`SETTLEMENTS_PER_TILE`) of those may be tier 0/1.
+
+Tier before area is the whole point of the ordering: area alone is exactly backwards for
+the kinds this revision adds. A settlement node has NO footprint, so it sorted last and was
+truncated away — measured on the live bake, downtown Wichita's three slots hold three city
+parks, so `Wichita` would never have shipped from the cell it names. A national park has an
+enormous footprint, so it would have taken slot 1 in every tile it covers. Within a tier the
+order is unchanged from revision 1 (area descending), so the pre-existing kinds keep their
+relative ranking; distance replaces name as the first tiebreak, which is the only
+meaningful key for the zero-area point kinds.
 
 ### 10.3 `habitat` — per-spawn-cell class grid
 
@@ -253,15 +336,47 @@ cx0 = floor(20·lngIdx / 3)      cx1 = ceil(20·(lngIdx+1) / 3) − 1     cols =
 
 `cells` is one character per spawn cell, `rows × cols` long, **row-major,
 south→north** (cy ascending is the outer loop), **west→east** (cx ascending)
-within a row: index `= (cy−cy0)·cols + (cx−cx0)`. Codes: `u` urban,
-`r` residential, `g` green, `.` rural. Because 20/3 is not an integer, edge
+within a row: index `= (cy−cy0)·cols + (cx−cx0)`. Because 20/3 is not an integer, edge
 spawn cells straddle tile boundaries and appear in two (or four) tiles'
 grids — the class is a function of the cell alone, so overlapping tiles agree.
 
-### 10.4 Habitat classifier — v1, normative
+Codes:
+
+| char | class | |
+|---|---|---|
+| `u` | urban | |
+| `r` | residential | |
+| `w` | woodland | revision 2 |
+| `s` | greenspace | revision 2 |
+| `.` | rural | the default |
+| `m` | mountain | **RESERVED, not emitted.** The client vocabulary declares it; the classifier needs an elevation source (Copernicus GLO-30 relief) this bake does not have. Revision 2's named peaks with `ele` are its calibration set. |
+| `g` | ~~green~~ | **RETIRED in revision 2.** Never re-spent. |
+
+**`g` is retired, not reused, and that is a compatibility decision.** Revision 1's `g` meant
+"wood or green" and revision 2 splits that in two (§10.4). Re-spending the character would
+make a revision-1 tile and a revision-2 tile disagree about what `g` claims, and an old
+client would silently read every `greenspace` cell as woodland — a wrong answer where the
+whole grid's job is to be a right one.
+
+What each side sees across the boundary:
+
+- **An old client reading a revision-2 tile** decodes `w` and `p` as unknown characters.
+  Ausculta's `HABITAT_CODE` maps an unknown character to nothing and the cell falls back to
+  rural, so an old app reads every wooded or park cell as rural. That is quiet degradation
+  and correct abstention — it under-claims rather than mis-claims.
+- **A new client reading a revision-1 tile** does **not** map `g` to either successor. The
+  client's `HABITAT_CODE` omits it deliberately, so it decodes to nothing and the cell falls
+  back to rural: `g` might have meant either, and the whole reason for the split is that the
+  two are not interchangeable, so picking one would be exactly the fabrication the split
+  exists to end. Legacy cells go quiet rather than wrong. After this re-bake no tile on the
+  CDN contains `g` at all (all five live v5 slices are re-baked), so the only `g` left is in
+  on-device caches, for at most their 30-day TTL.
+
+### 10.4 Habitat classifier — v2, normative
 
 The vocabulary is Ausculta's `packages/content/src/habitat.ts` exactly:
-`urban | residential | green | rural`. Ausculta's server re-derives spawns
+`urban | residential | woodland | greenspace | rural` (plus `mountain`, which that module
+declares and this bake does not yet produce — see §10.3). Ausculta's server re-derives spawns
 from these classes, so the classification must be reproducible from this spec
 + the OSM extract. It is a pure function of two per-cell aggregates:
 
@@ -273,24 +388,53 @@ Groups: `res` = `residential|living_street`, `foot` =
 (`living_street` counts as `res` here even though v4's `foot` flag includes
 it — habitat cares that people live on it.)
 
-**Green cover.** Each cell has a 2×2 sample grid (at 0.25/0.75 of the cell in
-each axis); a sample is covered when it falls inside a `green` or `wood`
-landcover polygon (post-simplification, post-2000 m² threshold, even-odd over
-the polygon's rings). `greenFrac` = covered samples / 4.
+**Cover.** Each cell has a 2×2 sample grid (at 0.25/0.75 of the cell in
+each axis); a sample is covered when it falls inside a landcover polygon
+(post-simplification, post-2000 m² threshold, even-odd over the polygon's rings). Revision
+2 keeps **two** sample masks rather than one: `woodFrac` counts samples inside a `wood`
+polygon, `greenFrac` samples inside a `green` one, each / 4. A sample inside both — a
+wooded corner of a park — sets both. `coverFrac` is the count of samples inside **either**,
+/ 4, which is bit-for-bit revision 1's single `greenFrac`.
 
 Rules apply **in order**, first match wins (`all = foot + res + road`;
 thresholds are the `HAB` constant in `tile.mjs`):
 
-1. **green** if `greenFrac ≥ 0.5` **and** `foot > 0` — trackless forest is
+1. **green family** if `coverFrac ≥ 0.5` **and** `foot > 0` — trackless forest is
    rural; a wood with a path through it is walkable green. (Without the `foot`
    guard, ~40% of Massachusetts' green cells were unreachable forest.)
 2. **urban** if `all ≥ 900 m` and `res/all ≤ 0.35`
-3. **green** if `foot ≥ 120 m` and `foot/all ≥ 0.7`
+3. **green family** if `foot ≥ 120 m` and `foot/all ≥ 0.7`
 4. **residential** if `res ≥ 120 m` and `res/all ≥ 0.4`
 5. **rural** otherwise — including cells with no data at all (the default).
 
-**Sidecar:** `out/habitat-<slice>.jsonl` — one line per **non-rural** cell
-(rural-as-default keeps it small), `{"cx":…,"cy":…,"class":"green"}`, sorted
+**Which green.** Rules 1 and 3 select the *family*; this selects the member, and it is
+deliberately a separate question:
+
+> **`woodland`** if `woodFrac > 0` **and** `woodFrac ≥ greenFrac`; **`greenspace`**
+> otherwise.
+
+The split is a **partition of revision 1's `green`, not a redrawing of its boundary** — the
+gate is unchanged, so no cell moves into or out of the green family, and every cell that
+was `green` becomes exactly one of the two. (Verified against the pre-revision tiler on a
+synthetic extract: same cell set, and every non-green class byte-identical.)
+
+`woodland` takes the tie, which is the case that actually occurs — a wooded corner of a
+large park. The reason that is not merely taste: §10.1's landcover precedence is already
+`water > wood > green`, so a polygon carrying **both** `natural=wood` and `leisure=park`
+resolves to `wood` at the polygon layer. Letting `greenspace` win here would leave the two
+layers disagreeing about the same square metre. Secondarily, tree cover is the more
+distinctive fact and the more specific claim, and it is the one somebody had to map
+explicitly. *This is a structural argument, not a measured one — no revision-2 bake has run,
+so the sample counts that would settle it empirically do not exist yet.*
+
+With **no** cover evidence at all — rule 3, a trail-dominated cell with nothing mapped
+around it — the answer is `greenspace`. `woodland` is a claim about tree cover and there is
+none to support it; `greenspace` is the weaker claim, which is the one to make when the
+evidence is absent.
+
+**Sidecar:** `out/habitat-<slice>.jsonl` — `class` is the full word
+(`"woodland"` / `"greenspace"`, not the grid character) — one line per **non-rural** cell
+(rural-as-default keeps it small), `{"cx":…,"cy":…,"class":"woodland"}`, sorted
 by `cy` then `cx`. The exactly-one-writer rule (§4) applies at spawn-cell
 granularity: a cell is emitted iff its center is inside the slice poly. (Tile
 habitat grids near slice borders may include cells classified from the
@@ -307,7 +451,59 @@ Measured on the Massachusetts slice (first v5 bake, 2026-07):
 
 v5 is 1.10× v4 total bytes (p50 1.15×, p95 1.05×) including 234 v5-only
 landcover cells — far inside the ~3× p95 budget. The habitat sidecar is
-12.3 MB / 277k non-rural cells (116k green, 152k residential, 9k urban).
+12.3 MB / 277k non-rural cells (116k green, 152k residential, 9k urban) — revision 1
+numbers; revision 2 partitions that 116k into woodland + greenspace without changing the
+total, so the sidecar size is unchanged.
 Tiling cost: +85 s over the 60 s v4-only bake for the whole state. If a later
 slice blows the ~3× p95 budget, tighten `SIMPLIFY_TOL_M` / `LC_MIN_AREA_M2`
 before touching the format.
+
+**Revision 2's delta is not yet measured** (the table above is revision 1, and the honest
+statement is that no revision-2 bake has run). The arithmetic, to be replaced by
+measurement after the first one:
+
+- Three more landmark slots at ~70 B each is ~210 B on an 11.3 KB p50 tile, **+1.9%**.
+- `lit`/`access` add ~12–24 B to a *tagged* way only. US `lit` coverage is thin and
+  `access=private` is common on service roads; even at a generous 10% of ways in a
+  2,000-way downtown tile that is ~4 KB pre-gzip against a 600 KB payload, and it gzips
+  against a highly repetitive key set.
+- **New landmark-only tiles are the item to watch.** Containment binning (§10.2) writes a
+  v5 tile for every cell inside a national park or protected area, including cells with no
+  ways, no landcover and nothing else. A synthetic 0.4° × 0.2° park produced 800 such
+  tiles at ~150 B each. Utah is the stress case — roughly two-thirds federal land, much of
+  it `boundary=protected_area` — where this could plausibly add ~10^5 tiles, ~15 MB and
+  ~$0.45 of Class-A writes. That is the price of a national park being visible from
+  anywhere inside it rather than only near its centroid.
+
+### 10.6 Per-way attributes — `lit` and `access`
+
+Two OPTIONAL keys on a v5 way object, alongside `points` and `foot`:
+
+| key | type | from |
+|---|---|---|
+| `lit` | `true` / `false` | `lit=yes\|24/7\|sunset-sunrise\|dusk-dawn\|automatic` → `true`; `lit=no\|disused` → `false` |
+| `access` | `"private"` / `"no"` / `"permissive"` | `access=` those three values, verbatim |
+
+Both are **written only when the tag is present and unambiguous**. Anything else —
+`lit=limited`, `lit=interval`, `access=destination`, `access=customers`, an unrecognised
+value, or no tag at all — is **omitted**. Absent therefore means UNKNOWN and must never be
+read as `false`: `lit` exists to stop street-safety routing a player down an unlit path
+after dark, and a fabricated `false` is worse than a gap because the player can see a gap
+and cannot see a fabrication. Absent `access` means no restriction is mapped, which is the
+absence of a claim, not a claim of "public".
+
+**These need no osmium filter line.** `tags-filter` selects OBJECTS and keeps every tag on
+the ones it selects, so both tags already arrive on every way the `w/highway=` line matched.
+They were never missing from the extract, only from the tiler's output.
+
+**Why they ride on the way object rather than in a parallel array.** `names` is a parallel
+array, and the obvious symmetry would be `lit`/`access` as two more. It is wrong here: the
+client's seam-dedupe merge (a way at a tile boundary appears in both tiles) carries the way
+OBJECT by reference and drops anything not attached to it, so a parallel array would force
+a second, divergent dedupe app-side — which is exactly how a seam-duplicated way quietly
+doubles a street's weight in the walk graph. Riding on the object also costs nothing for
+the untagged majority, whereas a parallel array pays one slot per way either way.
+
+**v4 is untouched.** v4's way objects are `{points, foot}`, spelled out field by field in
+`tile.mjs`'s v4 write loop; neither key can reach them. Verified by re-tiling the same
+input with the pre-revision tiler and diffing: `out/v4` and `hashes.json` are byte-identical.

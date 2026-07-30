@@ -10,6 +10,9 @@
 //   BOX_HALF_M = 1200      each tile holds all data within 1200 m of the cell CENTER
 //   payload v4 = { v:4, ways:[{points,foot}], names:[string|null], crossings:[{lat,lng}] }
 //   payload v5 = { v:5, ...v4 keys..., landcover, landmarks, habitat }   (additive)
+//     …and v5's ways may additionally carry `lit` (boolean) and `access`
+//     ('private'|'no'|'permissive'), written ONLY when OSM tags them. v4's way objects
+//     are spelled out field-by-field below and never see either, so v4 stays byte-identical.
 //
 // Input: `osmium export <filtered.pbf> -f geojsonseq --add-unique-id=type_id`
 // Output: <out>/v4/<i>/<j>.json.gz  +  <out>/hashes.json  (cellKey -> sha256 of the
@@ -44,22 +47,87 @@ const SIMPLIFY_TOL_M = 10; // Douglas-Peucker tolerance — shapes stay recogniz
 const LC_MIN_AREA_M2 = 2000; // drop landcover rings smaller than this before clipping
 const LC_MIN_CLIPPED_M2 = 1000; // drop per-tile clipped slivers smaller than this
 const LC_CLASSES = ['water', 'wood', 'green', 'field']; // precedence order when tags overlap
-const LANDMARKS_PER_TILE = 3;
+const LANDMARKS_PER_TILE = 6;
+// At most this many SETTLEMENT landmarks (tier 0/1) in one tile. A metro packs several
+// place=city/town nodes inside one city radius — Boston, Cambridge, Somerville, Brookline
+// are all within 8 km of each other — and without a cap they would take every slot in the
+// tile and push out the parks that make the drawn page legible.
+const SETTLEMENTS_PER_TILE = 2;
+// How far from a settlement's centre NODE that settlement is listed as a landmark.
+// This is PROXIMITY, not membership: OSM maps a settlement's extent as a
+// boundary=administrative relation, which this bake deliberately does not carry (see
+// SPEC §10.2). A flat 1200 m would make "you walked through Provo" almost always false-
+// negative — you can walk all day inside a city without passing within 1.2 km of its
+// centre node — so the radius scales with the place class. It is an approximation and the
+// spec says so; it never claims containment.
+const PLACE_RADIUS_M = { city: 8000, town: 4000, village: 2000, suburb: 2000, hamlet: 1200 };
+// Landmark kinds by TIER — the first sort key inside a tile (SPEC §10.2). Footprint area
+// only breaks ties WITHIN a tier, which is what stops a zero-area settlement node from
+// sorting last and being truncated away: measured on the live bake, downtown Wichita's
+// three landmark slots are three city parks, so "Wichita" itself would never have shipped.
+const LANDMARK_TIER = {
+  city: 0,
+  town: 0,
+  village: 1,
+  hamlet: 1,
+  suburb: 1,
+  peak: 2,
+  national_park: 3,
+  protected_area: 3,
+  park: 4,
+  nature_reserve: 4,
+  common: 4,
+  cemetery: 4,
+  library: 4,
+};
+const PLACE_KINDS = new Set(['city', 'town', 'village', 'hamlet', 'suburb']);
+// A tier-0/1 landmark is a settlement; SETTLEMENTS_PER_TILE applies to exactly these.
+const isSettlement = (kind) => LANDMARK_TIER[kind] <= 1;
+// Candidate-tile ceiling for containment binning of one area landmark (~a 500 km square).
+// A pathological protected_area spanning an ocean must not turn into a 10^6-cell loop;
+// above the cap the landmark falls back to centroid-proximity binning alone.
+const LM_COVER_MAX_CELLS = 200000;
+// OSM `lit` -> boolean, for the values that are UNAMBIGUOUS. Everything else — `limited`,
+// `interval`, `seasonal`, an unrecognised value, or no tag at all — is OMITTED rather than
+// guessed. Absent means UNKNOWN and must never be read as "unlit": this field exists to
+// keep street-safety from routing a player down a dark path, and a fabricated `false` is
+// worse than a gap because the gap is visible and the fabrication is not.
+const LIT_YES = new Set(['yes', '24/7', 'sunset-sunrise', 'dusk-dawn', 'automatic']);
+const LIT_NO = new Set(['no', 'disused']);
+// The three access values worth carrying: all three mean "do not route a player here".
+// `destination`, `customers`, `agricultural` etc. are omitted — they are not a clean
+// no, and a wrong restriction is as bad as a missing one.
+const ACCESS_KINDS = new Set(['private', 'no', 'permissive']);
 const HAB_STEP_M = 20; // way length is credited to spawn cells in steps of this size
 // Habitat classifier thresholds — v1, normative (SPEC.md §10.4). Rules apply IN ORDER.
 const HAB = {
-  GREEN_COVER_MIN: 0.5, //  1. green: ≥ this fraction of the cell's 2x2 samples in green/wood cover
-  //                                   AND any foot-group way present (trackless forest is rural,
-  //                                   a wood with a path through it is walkable green)
+  GREEN_COVER_MIN: 0.5, //  1. woodland|greenspace: ≥ this fraction of the cell's 2x2 samples
+  //                                   covered by green OR wood landcover (the UNION, exactly
+  //                                   revision 1's test), AND any foot-group way present
+  //                                   (trackless forest is rural, a wood with a path through
+  //                                   it is walkable green). Which of the two it becomes is
+  //                                   a separate question — see greenKind().
   URBAN_LEN_MIN: 900, //    2. urban: ≥ this many m of walkable way in the cell, and…
   URBAN_RES_SHARE_MAX: 0.35, //        …residential share ≤ this
-  PATH_LEN_MIN: 120, //     3. green: ≥ this many m of pure foot way, and…
+  PATH_LEN_MIN: 120, //     3. woodland|greenspace: ≥ this many m of pure foot way, and…
   PATH_SHARE_MIN: 0.7, //              …foot share ≥ this
   RES_LEN_MIN: 120, //      4. residential: ≥ this many m of residential/living_street, and…
   RES_SHARE_MIN: 0.4, //               …residential share ≥ this
   //                        5. rural: everything else (the default — sidecar omits it)
 };
-const HAB_CODE = { urban: 'u', residential: 'r', green: 'g', rural: '.' };
+// Grid characters (SPEC §10.3), matching Ausculta's HABITAT_CODE exactly.
+//
+// `g` is RETIRED, not reused: revision 1's `g` meant "wood OR green" and revision 2 splits
+// that in two, so re-spending the character would make an old tile and a new tile disagree
+// about what `g` claims — a client would silently read every greenspace cell as woodland.
+// The client does not map `g` to either successor either; it decodes to nothing and the
+// cell falls back to rural. Legacy cells go quiet rather than wrong.
+//
+// `m` (mountain) is reserved by the client's vocabulary and is NOT emitted here: the
+// mountain classifier needs an elevation source this bake does not have (Copernicus
+// GLO-30, regional relief). Reserving the character now is free; the named peaks with
+// `ele` that revision 2 adds are that classifier's calibration set.
+const HAB_CODE = { urban: 'u', residential: 'r', woodland: 'w', greenspace: 's', rural: '.' };
 
 // ---- args ----
 const argv = process.argv.slice(2);
@@ -102,11 +170,14 @@ function haversineM(aLat, aLng, bLat, bLng) {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
 }
 
-// Cells whose CENTER is within BOX_HALF_M of (lat,lng). At 0.01 deg (~1.1 km) that's
-// this cell plus the ring of neighbors it reaches — ~3x3 candidates, filtered by true distance.
-function cellsNear(lat, lng) {
-  const latPad = BOX_HALF_M / 111320 + TILE_DEG;
-  const lngPad = BOX_HALF_M / (111320 * Math.cos(lat * Math.PI / 180)) + TILE_DEG;
+// Cells whose CENTER is within `radiusM` of (lat,lng). At the default BOX_HALF_M and
+// 0.01 deg (~1.1 km) that's this cell plus the ring of neighbors it reaches — ~3x3
+// candidates, filtered by true distance. Landmark binning passes a larger radius for
+// settlement nodes (PLACE_RADIUS_M); ways and crossings always use BOX_HALF_M, so v4 is
+// untouched by the parameter existing.
+function cellsNear(lat, lng, radiusM = BOX_HALF_M) {
+  const latPad = radiusM / 111320 + TILE_DEG;
+  const lngPad = radiusM / (111320 * Math.cos(lat * Math.PI / 180)) + TILE_DEG;
   const iMin = Math.floor((lat - latPad) / TILE_DEG);
   const iMax = Math.floor((lat + latPad) / TILE_DEG);
   const jMin = Math.floor((lng - lngPad) / TILE_DEG);
@@ -115,7 +186,7 @@ function cellsNear(lat, lng) {
   for (let i = iMin; i <= iMax; i++) {
     for (let j = jMin; j <= jMax; j++) {
       const c = cellCenter(i, j);
-      if (haversineM(lat, lng, c.lat, c.lng) <= BOX_HALF_M) out.push(i + ':' + j);
+      if (haversineM(lat, lng, c.lat, c.lng) <= radiusM) out.push(i + ':' + j);
     }
   }
   return out;
@@ -131,13 +202,31 @@ function cell(key) {
   return c;
 }
 
-function addWay(id, points, foot, name) {
+function addWay(id, points, foot, name, lit, access) {
   const touched = new Set();
   for (const p of points) for (const k of cellsNear(p.lat, p.lng)) touched.add(k);
   for (const k of touched) {
     const c = cell(k);
-    if (!c.ways.has(id)) c.ways.set(id, { points, foot, name }); // points shared by ref, not copied
+    // points shared by ref, not copied. `lit`/`access` are undefined for the vast
+    // majority of ways and are only ever WRITTEN into the v5 payload (SPEC §10.6) —
+    // the v4 write loop below spells its way objects out field by field, so v4 stays
+    // byte-identical whatever is attached here.
+    if (!c.ways.has(id)) c.ways.set(id, { points, foot, name, lit, access });
   }
+}
+
+// OSM `lit=*` -> boolean | undefined. See LIT_YES/LIT_NO: undefined is ABSTENTION.
+function wayLit(pr) {
+  const v = pr.lit;
+  if (LIT_YES.has(v)) return true;
+  if (LIT_NO.has(v)) return false;
+  return undefined;
+}
+
+// OSM `access=*` -> one of ACCESS_KINDS | undefined. Absent means no restriction is
+// mapped, which is not the same claim as "public" — it is the absence of one.
+function wayAccess(pr) {
+  return ACCESS_KINDS.has(pr.access) ? pr.access : undefined;
 }
 
 function addCrossing(lat, lng) {
@@ -152,7 +241,8 @@ const lcPolys = []; // { cls, rings:[[ [lng,lat], … ]…] } — rings open (no
 const lcByCell = new Map(); // tileKey -> [lcPolys index]  (clipped lazily at write time)
 const lmByCell = new Map(); // tileKey -> [{ name, lat, lng, kind, area }]
 const hab = new Map(); // `${cx}:${cy}` (Ausculta cellId order: cx=lng, cy=lat) ->
-//                        { foot, res, road, mask } — meters per way group + 2x2 green-sample bits
+//                        { foot, res, road, wmask, gmask } — meters per way group + the
+//                        2x2 cover-sample bits, wood and green kept APART (SPEC §10.4)
 
 function landcoverClass(pr) {
   // Precedence when a feature carries tags from several classes: LC_CLASSES order.
@@ -169,13 +259,38 @@ function landcoverClass(pr) {
   return null;
 }
 
+// Landmark kind, most-specific tag first (SPEC §10.2). Order is load-bearing for the
+// three US national parks this was checked against — Everglades, Grand Canyon and Zion
+// are ALL tagged `boundary=protected_area` + `leisure=nature_reserve` and NONE of them
+// carries `boundary=national_park`, so a `leisure` test placed first would have quietly
+// classed every US national park as a local nature reserve. `protect_class=2` is IUCN
+// category II ("National Park") and `protected_area=national_park` is the US tagging;
+// Grand Canyon has only the latter, Everglades and Zion have both.
 function landmarkKind(pr) {
+  if (pr.boundary === 'national_park') return 'national_park';
+  if (pr.boundary === 'protected_area')
+    return pr.protect_class === '2' || pr.protected_area === 'national_park'
+      ? 'national_park'
+      : 'protected_area';
+  if (pr.natural === 'peak') return 'peak';
+  if (PLACE_KINDS.has(pr.place)) return pr.place;
   if (pr.leisure === 'park') return 'park';
   if (pr.amenity === 'library') return 'library';
   if (pr.landuse === 'cemetery') return 'cemetery';
   if (pr.leisure === 'nature_reserve') return 'nature_reserve';
   if (pr.leisure === 'common') return 'common';
   return null;
+}
+
+// OSM `ele` -> integer metres, peaks only. Values carry units and separators in the wild
+// ("3581", "3581 m", "1,234"), so parse the leading float and refuse anything outside the
+// range a terrestrial summit can occupy — a bad `ele` in a calibration set is worse than
+// a missing one, and this set exists to calibrate the future mountain classifier.
+function parseEle(raw) {
+  if (typeof raw !== 'string' && typeof raw !== 'number') return undefined;
+  const e = Number.parseFloat(String(raw).replace(/,/g, ''));
+  if (!Number.isFinite(e) || e < -500 || e > 9000) return undefined;
+  return Math.round(e);
 }
 
 const round6 = (x) => Number(x.toFixed(6));
@@ -248,12 +363,73 @@ function ringCentroid(ring) {
   return { lng: cx / (3 * a2), lat: cy / (3 * a2) };
 }
 
-function addLandmark(name, lat, lng, kind, area) {
-  for (const k of cellsNear(lat, lng)) {
+// Tiles a landmark is listed in: every cell whose CENTER is within `radiusM` of the
+// label point, UNION every cell whose center falls INSIDE the landmark's own footprint.
+//
+// The union is the fix for the field this bake exists to add. Centroid proximity alone is
+// right for a town park (smaller than the 1200 m box) and useless for a national park —
+// measured on the live v5 tiles: the cell over Royal Palm, 6 km inside Everglades National
+// Park, carries ZERO landmarks today, even though the park IS already in the osmium filter
+// (`a/leisure=nature_reserve` matches it). The park was never missing from the bake; it was
+// only ever listed within 1200 m of its centroid, which is open sawgrass nobody walks.
+// Keeping the proximity term as well means nothing that ships today stops shipping — a
+// small polygon containing no tile center at all still gets its neighbourhood.
+function addLandmark(name, lat, lng, kind, area, ele, radiusM, coverRings) {
+  const keys = new Set(cellsNear(lat, lng, radiusM ?? BOX_HALF_M));
+  if (coverRings) for (const k of cellsInsideRings(coverRings)) keys.add(k);
+  for (const k of keys) {
     let list = lmByCell.get(k);
     if (!list) lmByCell.set(k, (list = []));
-    list.push({ name, lat, lng, kind, area });
+    list.push({ name, lat, lng, kind, area, ele });
   }
+}
+
+// Cell keys whose CENTER falls inside the (even-odd) ring set.
+//
+// SCANLINE, not a point-in-polygon per candidate cell, and the difference is not
+// cosmetic: the polygons this runs on are state-scale (Utah is ~65% federal land, most of
+// it one boundary=protected_area or another), so the naive form is O(rows x cols x
+// ringPoints) — for one 5,000-point polygon over a 300 x 300 tile bbox that is 4.5x10^9
+// operations, minutes per feature. Crossings are computed ONCE per row and filled as
+// spans instead: O(rows x ringPoints + cells). Same even-odd rule as `rasterizeCover`
+// above, which solves the identical problem one grid finer, so holes work.
+//
+// Bounded by LM_COVER_MAX_CELLS: above that the polygon is not a landmark anyone walks
+// through, it is a mapping artefact, and the caller falls back to proximity alone.
+function cellsInsideRings(rings) {
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+  for (const r of rings)
+    for (const [x, y] of r) {
+      if (y < minLat) minLat = y;
+      if (y > maxLat) maxLat = y;
+      if (x < minLng) minLng = x;
+      if (x > maxLng) maxLng = x;
+    }
+  if (!Number.isFinite(minLat)) return [];
+  const iMin = Math.floor(minLat / TILE_DEG), iMax = Math.floor(maxLat / TILE_DEG);
+  const jMin = Math.floor(minLng / TILE_DEG), jMax = Math.floor(maxLng / TILE_DEG);
+  if ((iMax - iMin + 1) * (jMax - jMin + 1) > LM_COVER_MAX_CELLS) return [];
+  const out = [];
+  for (let i = iMin; i <= iMax; i++) {
+    const y = (i + 0.5) * TILE_DEG;
+    if (y < minLat || y > maxLat) continue;
+    const xs = [];
+    for (const r of rings)
+      for (let a = 0; a < r.length; a++) {
+        const [x1, y1] = r[a];
+        const [x2, y2] = r[(a + 1) % r.length];
+        if (y1 > y !== y2 > y) xs.push(x1 + ((x2 - x1) * (y - y1)) / (y2 - y1));
+      }
+    xs.sort((p, q) => p - q);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      const xa = xs[k], xb = xs[k + 1];
+      for (let j = Math.floor(xa / TILE_DEG); j <= Math.floor(xb / TILE_DEG); j++) {
+        const x = (j + 0.5) * TILE_DEG;
+        if (x >= xa && x < xb) out.push(i + ':' + j);
+      }
+    }
+  }
+  return out;
 }
 
 // Bin a landcover polygon to every tile whose ±1200 m clip box intersects its bbox.
@@ -288,8 +464,12 @@ function binLandcover(idx) {
 
 function habCell(cx, cy) {
   const k = cx + ':' + cy;
+  // wmask / gmask: the 2x2 sample bits covered by `wood` and by `green` landcover
+  // respectively. Revision 1 kept one shared `mask`, which is the whole reason a deep
+  // forest and a municipal park collapsed into one class: the tiler HAS the distinction at
+  // the landcover layer (LC_CLASSES separates them) and threw it away here.
   let st = hab.get(k);
-  if (!st) hab.set(k, (st = { foot: 0, res: 0, road: 0, mask: 0 }));
+  if (!st) hab.set(k, (st = { foot: 0, res: 0, road: 0, wmask: 0, gmask: 0 }));
   return st;
 }
 
@@ -314,9 +494,11 @@ function habAddWay(points, hw) {
   }
 }
 
-// Mark each spawn cell's 2x2 green samples (at 0.25/0.75 of the cell in each axis)
-// covered by a green/wood polygon — scanline over all rings, even-odd (holes work).
-function rasterizeGreen(rings) {
+// Mark each spawn cell's 2x2 samples (at 0.25/0.75 of the cell in each axis) covered by
+// this polygon — scanline over all rings, even-odd (holes work). `field` selects which
+// mask: 'wmask' for a `wood` polygon, 'gmask' for a `green` one. A sample inside both a
+// wood and a park sets both bits, which is what lets greenKind() see the overlap.
+function rasterizeCover(rings, field) {
   let minLat = Infinity, maxLat = -Infinity;
   for (const r of rings)
     for (const p of r) {
@@ -344,7 +526,7 @@ function rasterizeGreen(rings) {
           for (const subX of [0.25, 0.75]) {
             const x = (cx + subX) * CELL_DEG;
             if (x >= xa && x < xb)
-              habCell(cx, cy).mask |= 1 << ((subY === 0.75 ? 2 : 0) + (subX === 0.75 ? 1 : 0));
+              habCell(cx, cy)[field] |= 1 << ((subY === 0.75 ? 2 : 0) + (subX === 0.75 ? 1 : 0));
           }
         }
       }
@@ -358,6 +540,7 @@ function addArea(g, cls, kind, name) {
   let totalArea = 0;
   let best = null; // largest outer ring, for the landmark centroid
   let bestArea = -1;
+  const coverRings = []; // every kept ring across every part — even-odd, so holes work
   for (const rings of polys) {
     let outer = rings[0];
     if (!outer || outer.length < 4) continue;
@@ -377,15 +560,17 @@ function addArea(g, cls, kind, name) {
         hole = hole.slice(0, -1);
       if (hole.length >= 3 && ringAreaM2(hole, cosLat) >= LC_MIN_AREA_M2) kept.push(hole);
     }
+    if (kind && name) for (const r of kept) coverRings.push(r);
     if (cls) {
       const idx = lcPolys.push({ cls, rings: kept }) - 1;
       binLandcover(idx);
-      if (cls === 'green' || cls === 'wood') rasterizeGreen(kept);
+      if (cls === 'wood') rasterizeCover(kept, 'wmask');
+      else if (cls === 'green') rasterizeCover(kept, 'gmask');
     }
   }
   if (kind && name && best) {
     const c = ringCentroid(best);
-    addLandmark(name, c.lat, c.lng, kind, totalArea);
+    addLandmark(name, c.lat, c.lng, kind, totalArea, undefined, BOX_HALF_M, coverRings);
   }
 }
 
@@ -409,7 +594,10 @@ for await (let line of rl) {
     const hw = pr.highway;
     if (WALK.has(hw)) {
       const points = g.coordinates.map((c) => ({ lat: c[1], lng: c[0] }));
-      addWay(id, points, FOOT.has(hw), pr.name || null);
+      // `lit` and `access` need NO osmium filter line: tags-filter SELECTS objects and
+      // keeps every tag on the ones it selects, so these already arrive on every way the
+      // highway filter matched. They cost a filter change of exactly zero.
+      addWay(id, points, FOOT.has(hw), pr.name || null, wayLit(pr), wayAccess(pr));
       habAddWay(points, hw);
     }
     if (pr.footway === 'crossing' && g.coordinates.length) {
@@ -418,8 +606,21 @@ for await (let line of rl) {
     }
   } else if (g.type === 'Point') {
     if (pr.highway === 'crossing') addCrossing(g.coordinates[1], g.coordinates[0]);
+    // POINT landmarks were already the path for `n/amenity=library`, so settlements and
+    // peaks — which OSM maps as nodes, not areas — need no new machinery, only a radius.
+    // Area 0 is what made them fragile: see LANDMARK_TIER.
     const kind = landmarkKind(pr);
-    if (kind && pr.name) addLandmark(pr.name, g.coordinates[1], g.coordinates[0], kind, 0);
+    if (kind && pr.name)
+      addLandmark(
+        pr.name,
+        g.coordinates[1],
+        g.coordinates[0],
+        kind,
+        0,
+        kind === 'peak' ? parseEle(pr.ele) : undefined,
+        PLACE_RADIUS_M[kind] ?? BOX_HALF_M,
+        null,
+      );
   } else if (g.type === 'Polygon' || g.type === 'MultiPolygon') {
     const cls = landcoverClass(pr);
     const kind = landmarkKind(pr);
@@ -519,8 +720,18 @@ function buildLandcover(i, j, idxs) {
   return out.map((p) => ({ kind: p.kind, rings: p.rings.map(toLatLng) }));
 }
 
-// Top LANDMARKS_PER_TILE by footprint (dedupe repeats of the same place by kind+name).
-function buildLandmarks(list) {
+// Top LANDMARKS_PER_TILE, deduped on kind+name, ordered TIER first (SPEC §10.2).
+//
+// Ordering by footprint alone — what this did before — is exactly backwards for the kinds
+// this bake adds. A `place=city` node has no footprint at all, so it sorted LAST and was
+// truncated away; a national park has an enormous one, so it would take slot 1 in every
+// tile it covers. Measured on the live bake: downtown Wichita's three slots hold three
+// city parks, so "Wichita" would never have shipped from the cell it names.
+//
+// Within a tier: area descending (unchanged for the pre-existing kinds), then distance to
+// the tile centre ascending — the meaningful key for the zero-area point kinds, and a
+// deterministic tiebreak for the rest in place of the old name-only one.
+function buildLandmarks(i, j, list) {
   if (!list) return [];
   const byId = new Map();
   for (const lm of list) {
@@ -528,21 +739,59 @@ function buildLandmarks(list) {
     const prev = byId.get(id);
     if (!prev || lm.area > prev.area) byId.set(id, lm);
   }
-  return [...byId.values()]
-    .sort((a, b) => b.area - a.area || (a.name < b.name ? -1 : 1))
-    .slice(0, LANDMARKS_PER_TILE)
-    .map((lm) => ({ name: lm.name, lat: round6(lm.lat), lng: round6(lm.lng), kind: lm.kind }));
+  const c = cellCenter(i, j);
+  const ranked = [...byId.values()]
+    .map((lm) => ({ lm, dist: haversineM(c.lat, c.lng, lm.lat, lm.lng) }))
+    .sort(
+      (a, b) =>
+        LANDMARK_TIER[a.lm.kind] - LANDMARK_TIER[b.lm.kind] ||
+        b.lm.area - a.lm.area ||
+        a.dist - b.dist ||
+        (a.lm.name < b.lm.name ? -1 : a.lm.name > b.lm.name ? 1 : 0),
+    );
+  const out = [];
+  let settlements = 0;
+  for (const { lm } of ranked) {
+    if (out.length >= LANDMARKS_PER_TILE) break;
+    if (isSettlement(lm.kind) && ++settlements > SETTLEMENTS_PER_TILE) continue;
+    const e = { name: lm.name, lat: round6(lm.lat), lng: round6(lm.lng), kind: lm.kind };
+    if (lm.ele !== undefined) e.ele = lm.ele;
+    out.push(e);
+  }
+  return out;
 }
 
-// Habitat class of one spawn cell — v1 rules, IN ORDER (normative — SPEC.md §10.4).
+const bits = (m) => (m & 1) + ((m >> 1) & 1) + ((m >> 2) & 1) + ((m >> 3) & 1);
+
+// Which of the two green-family classes a cell is, ONCE something has decided it is one.
+// Deliberately a separate question from the gate: the split is a PARTITION of revision 1's
+// `green`, never a redrawing of its boundary, so no cell moves in or out of the family.
+//
+// woodland wins a tie (a wooded corner of a large park — the real case) for two reasons.
+// The one that is not taste: §10.1's landcover precedence is already `water > wood > green`,
+// so a polygon carrying both `natural=wood` and `leisure=park` ALREADY resolves to `wood`.
+// Letting greenspace win here would make the two layers disagree about the same square
+// metre. The other: tree cover is the more distinctive fact, and the more specific claim
+// is the one that had to be explicitly mapped.
+//
+// With NO cover evidence at all (the path rule below), greenspace is the answer, because
+// woodland is a claim about tree cover and there is none to support it.
+function greenKind(st) {
+  const w = bits(st.wmask);
+  return w > 0 && w >= bits(st.gmask) ? 'woodland' : 'greenspace';
+}
+
+// Habitat class of one spawn cell — v2 rules, IN ORDER (normative — SPEC.md §10.4).
 function classifyHabitat(cx, cy) {
   const st = hab.get(cx + ':' + cy);
   if (!st) return 'rural';
-  const greenFrac = ((st.mask & 1) + ((st.mask >> 1) & 1) + ((st.mask >> 2) & 1) + ((st.mask >> 3) & 1)) / 4;
-  if (greenFrac >= HAB.GREEN_COVER_MIN && st.foot > 0) return 'green';
+  // The GATE is the union of the two masks — bit-identical to revision 1's single mask,
+  // so exactly the same cells enter the green family as before.
+  const coverFrac = bits(st.wmask | st.gmask) / 4;
+  if (coverFrac >= HAB.GREEN_COVER_MIN && st.foot > 0) return greenKind(st);
   const all = st.foot + st.res + st.road;
   if (all >= HAB.URBAN_LEN_MIN && st.res / all <= HAB.URBAN_RES_SHARE_MAX) return 'urban';
-  if (st.foot >= HAB.PATH_LEN_MIN && st.foot / all >= HAB.PATH_SHARE_MIN) return 'green';
+  if (st.foot >= HAB.PATH_LEN_MIN && st.foot / all >= HAB.PATH_SHARE_MIN) return greenKind(st);
   if (st.res >= HAB.RES_LEN_MIN && st.res / all >= HAB.RES_SHARE_MIN) return 'residential';
   return 'rural';
 }
@@ -572,12 +821,21 @@ for (const key of v5Keys) {
   const names = [];
   if (c)
     for (const w of c.ways.values()) {
-      ways.push({ points: w.points, foot: w.foot });
+      // v5 ONLY: the per-way attributes ride ON the way object rather than in a parallel
+      // array (SPEC §10.6). The client's seam-dedupe merge carries the way object by
+      // reference and drops anything not attached to it, so a parallel array would force a
+      // second, divergent dedupe app-side — which is precisely how a seam-duplicated way
+      // quietly doubles a street's weight in the walk graph. Written only when tagged, so
+      // an untagged way costs nothing and ABSENT keeps meaning UNKNOWN.
+      const way = { points: w.points, foot: w.foot };
+      if (w.lit !== undefined) way.lit = w.lit;
+      if (w.access !== undefined) way.access = w.access;
+      ways.push(way);
       names.push(w.name);
     }
   const crossings = c ? [...c.crossings.values()] : [];
   const landcover = buildLandcover(i, j, lcByCell.get(key));
-  const landmarks = buildLandmarks(lmByCell.get(key));
+  const landmarks = buildLandmarks(i, j, lmByCell.get(key));
   if (!ways.length && !crossings.length && !landcover.length && !landmarks.length) continue;
   const payload = { v: 5, ways, names, crossings, landcover, landmarks, habitat: buildHabitat(i, j) };
   const json = JSON.stringify(payload);
