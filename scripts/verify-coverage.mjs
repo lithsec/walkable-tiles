@@ -62,18 +62,26 @@ const PROBES = [
   ['unbaked', 'central Nevada (no slice baked)', 39.5, -117.0, 'empty', ['v4', 'v5']],
   ['unbaked', 'mid-Pacific', 30.0, -150.0, 'empty', ['v4', 'v5']],
 
-  ['arizona', 'downtown Phoenix', 33.4484, -112.074, 'dense', ['v4']],
-  ['arizona', 'downtown Tucson', 32.2226, -110.9747, 'dense', ['v4']],
-  ['arizona', 'Sonoran desert S of Gila Bend', 32.75, -112.85, 'sparse', ['v4']],
+  // ── v4 AND v5 for the three states whose v5 bake is pending ────────────────────────
+  //
+  // These carried `['v4']` only, which made this verifier PASS VACUOUSLY for the exact run
+  // it would be used to check: bake v5 for arizona, publish nothing, and a v4-only probe
+  // list still reports every probe green. A checker that silently checks nothing is worse
+  // than no checker, so v5 is listed here BEFORE it exists and these probes are expected to
+  // FAIL until the bake lands. That failure is the feature — it is the difference between
+  // "v5 is live" and "v5 was never asked about".
+  ['arizona', 'downtown Phoenix', 33.4484, -112.074, 'dense', ['v4', 'v5']],
+  ['arizona', 'downtown Tucson', 32.2226, -110.9747, 'dense', ['v4', 'v5']],
+  ['arizona', 'Sonoran desert S of Gila Bend', 32.75, -112.85, 'sparse', ['v4', 'v5']],
 
-  ['florida', 'downtown Miami', 25.7617, -80.1918, 'dense', ['v4']],
-  ['florida', 'downtown Orlando', 28.5384, -81.3789, 'dense', ['v4']],
-  ['florida', 'Everglades L-28 levee', 25.85, -80.85, 'sparse', ['v4']],
-  ['florida', 'Atlantic E of Miami Beach', 25.76, -79.99, 'empty', ['v4']],
+  ['florida', 'downtown Miami', 25.7617, -80.1918, 'dense', ['v4', 'v5']],
+  ['florida', 'downtown Orlando', 28.5384, -81.3789, 'dense', ['v4', 'v5']],
+  ['florida', 'Everglades L-28 levee', 25.85, -80.85, 'sparse', ['v4', 'v5']],
+  ['florida', 'Atlantic E of Miami Beach', 25.76, -79.99, 'empty', ['v4', 'v5']],
 
-  ['kansas', 'downtown Wichita', 37.6872, -97.3301, 'dense', ['v4']],
-  ['kansas', 'downtown Topeka', 39.0473, -95.6752, 'dense', ['v4']],
-  ['kansas', 'Gove County farmland', 38.75, -100.55, 'sparse', ['v4']],
+  ['kansas', 'downtown Wichita', 37.6872, -97.3301, 'dense', ['v4', 'v5']],
+  ['kansas', 'downtown Topeka', 39.0473, -95.6752, 'dense', ['v4', 'v5']],
+  ['kansas', 'Gove County farmland', 38.75, -100.55, 'sparse', ['v4', 'v5']],
 ];
 
 const FLOORS = { ways: 200, named: 20, crossings: 50, ptsInCell: 100 };
