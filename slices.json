@@ -4,6 +4,10 @@
   { "name": "california",      "url": "https://download.geofabrik.de/north-america/us/california-latest.osm.pbf",      "day": 2 },
   { "name": "texas",           "url": "https://download.geofabrik.de/north-america/us/texas-latest.osm.pbf",           "day": 3 },
   { "name": "washington",      "url": "https://download.geofabrik.de/north-america/us/washington-latest.osm.pbf",      "day": 4 },
+  { "name": "utah",            "url": "https://download.geofabrik.de/north-america/us/utah-latest.osm.pbf",            "day": 5 },
+  { "name": "arizona",         "url": "https://download.geofabrik.de/north-america/us/arizona-latest.osm.pbf",         "day": 6 },
+  { "name": "florida",         "url": "https://download.geofabrik.de/north-america/us/florida-latest.osm.pbf",         "day": 7 },
+  { "name": "kansas",          "url": "https://download.geofabrik.de/north-america/us/kansas-latest.osm.pbf",          "day": 7 },
 
   { "name": "england",         "url": "https://download.geofabrik.de/europe/great-britain/england-latest.osm.pbf",     "day": 8 },
   { "name": "ile-de-france",   "url": "https://download.geofabrik.de/europe/france/ile-de-france-latest.osm.pbf",      "day": 9 },

@@ -10,6 +10,9 @@
 #           ./scripts/bake-all.sh [slices.world.json]
 # Env:    JOBS (parallel slices, default 3)   STATE_DIR (default .bake-state)
 #         R2_DRY_RUN=1 to build locally without uploading (smoke test the loop)
+#         R2_CONCURRENCY is inherited by each bake-slice.sh, so in-flight R2 requests
+#         are JOBS × R2_CONCURRENCY (default 3 × 128 = 384). Turn one down if R2
+#         starts 429ing; the uploads are the only thing here that talks to R2.
 set -euo pipefail
 
 SLICES="${1:-slices.json}"

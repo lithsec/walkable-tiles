@@ -85,6 +85,36 @@ Inside each slice, after assembling tiles:
 Because month-over-month OSM churn is small, most slices re-upload only a handful
 of tiles → Class-A writes stay negligible even re-baking the planet.
 
+**How the changed set actually goes up.** The diff decides *which* tiles; getting
+them there is a throughput problem, and the obvious shape is the wrong one. One
+`aws s3 cp` per object under `xargs -P 16` measures **15.6 objects/s** on a 12-core
+machine — the box saturates on Python interpreter startup, not on the network. A
+first-bake slice is 100k–250k objects *per version*, so that shape is 3–5 hours of
+process spawning per slice, which is also how a slice blows the workflow's
+120-minute `timeout-minutes`.
+
+Instead the changed tiles are hardlinked into a staging tree mirroring the R2
+layout (`cpio -pdl`, one process, ~1,250 files/s, no bytes copied) and the tree is
+handed to a single `aws s3 cp --recursive`, which reuses its own connection pool:
+**160 objects/s**, a 10× improvement, same bytes and same headers. A single
+recursive cp is equivalent to N individual ones precisely because every tile in a
+bake takes identical metadata (`application/json`, `gzip`, 7 d).
+
+Two properties this shape must keep:
+
+- **`AWS_ENDPOINT_URL` stays an exported env var.** It is no longer load-bearing for
+  the tile PUTs (they run in the main shell now), but the manifest and sidecar copies
+  and any future child process still depend on it. A shell-function wrapper alone
+  once sent every tile to `s3.auto.amazonaws.com` while the manifest copy succeeded,
+  leaving a manifest that claimed tiles the bucket never received.
+- **Staging is verified by counting, not by exit code.** `cpio` reports per-file
+  failures on stderr and still exits 0. An empty stage feeds `cp --recursive` an
+  empty tree, which uploads nothing and succeeds — reproducing that same
+  manifest-claims-what-the-bucket-lacks state from the other direction. So
+  `upload_version` asserts staged == changed and aborts otherwise. (This is not
+  hypothetical: on macOS `mktemp -d` returns a path under the `/var` → `/private/var`
+  symlink, which BSD `cpio -p` refuses to write through.)
+
 ## 6. App wiring (the client half)
 
 Implemented in `apps/mobile/src/run/osm.ts`. The app wants everything within

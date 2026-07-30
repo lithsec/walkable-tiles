@@ -85,6 +85,41 @@ walkable-tiles/
 - Only **data-bearing** cells are written (oceans/empty land skipped), cutting
   ~2 B theoretical cells to ~5–10 M real ones.
 
+### What is actually published
+
+The bucket is not the world yet, and **v4 and v5 coverage differ** — v4 was seeded
+first, v5 came with the Ausculta format. A slice is only *refreshed* if it is also a
+row in `slices.json`; publishing tiles without adding the row leaves them frozen at
+whatever OSM said the day they were baked.
+
+| Slice | v4 (ways) | v5 (terrain) | in `slices.json` |
+|---|---|---|---|
+| massachusetts | yes | yes | yes |
+| utah | yes | yes | yes |
+| arizona | yes | **no** | yes |
+| florida | yes | **no** | yes |
+| kansas | yes | **no** | yes |
+| virginia | yes | **no** | **no** |
+| maryland | yes | **no** | **no** |
+
+Everything else 404s, which the client reads as "empty cell" — indistinguishable
+from ocean. **A region with v4 but no v5 renders ways with no landcover wash,
+landmarks, or habitat grid**: Ausculta's terrain layer degrades silently rather
+than erroring, so a missing v5 slice is invisible from inside the app. The only
+proof of coverage is fetching a tile and looking at its contents.
+
+Washington DC is a hole in an otherwise-covered region: the `virginia` and
+`maryland` extracts each own only their own side of the boundary, and
+`district-of-columbia` was never baked, so cells over the District have neither
+version.
+
+**Only `massachusetts` and `utah` have `hashes/` manifests.** The other slices'
+tiles were pushed without one, which has two consequences worth knowing before you
+read the table as a completeness claim: their *completeness is unproven* (the
+manifest is the only record of what a bake intended to write, so there is nothing to
+diff the bucket against), and their next bake re-uploads every tile rather than just
+the changed ones, because an absent manifest reads as an empty one.
+
 ---
 
 ## How a bake works (per slice)
@@ -117,6 +152,7 @@ scripts/bake-all.sh          # one-time local seed: bake every slice → R2 (res
 scripts/bake-slice.sh        # download → filter → tile → diff → upload
 scripts/tile.mjs             # OSM features → v4 tiles + gzip
 scripts/serve-local.mjs      # serve baked tiles locally like the CDN (dev only)
+scripts/verify-coverage.mjs  # prove published coverage by value through the CDN
 LICENSE  NOTICE  DATA-LICENSE.md
 SPEC.md                      # matrix / scheduling / boundary / diff design
 HOSTING.md                   # cost model + Cloudflare abuse hardening
@@ -174,6 +210,44 @@ everything else, local dry-run + `serve-local.mjs` is enough.
 export R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… R2_BUCKET=walkable-tiles
 ./scripts/bake-slice.sh <pbf-url> <slice-name>
 ```
+
+**Resuming an upload that died.** Tiling a big slice costs a download plus tens of
+minutes of CPU; the upload is hundreds of thousands of small PUTs and is the part
+that actually fails (flaky endpoint, laptop sleeping, `^C`). `R2_UPLOAD_ONLY=1`
+reuses an `OUT_DIR` that already has tiles *and* its two hash manifests, and goes
+straight to diff + upload:
+
+```bash
+OUT_DIR=./out R2_UPLOAD_ONLY=1 ./scripts/bake-slice.sh <pbf-url> <slice-name>
+```
+
+The diff makes this safe to re-run: already-uploaded tiles hash-match and are
+skipped. Note the manifests in `OUT_DIR` belong to **whichever slice tiled last** —
+`OUT_DIR` accumulates tiles across a multi-slice local seed, but `hashes.json` does
+not, so always pass the slice name whose manifests are currently on disk.
+
+`R2_CONCURRENCY` (default 128) sets in-flight requests per `aws` process. Lower it
+if R2 starts returning 429s.
+
+## Verifying a bake
+
+```bash
+TILES_HOST=https://tiles.example.com node scripts/verify-coverage.mjs
+TILES_HOST=…                          node scripts/verify-coverage.mjs --slice utah
+```
+
+Counting objects in the bucket proves nothing about them: **an HTTP 200 is true for
+an empty tile**, and a hash manifest will happily claim tiles the bucket never
+received. So this fetches known coordinates through the CDN and asserts on things
+only real OSM data produces — way counts, named streets, crossings, v5 landcover
+polygons, and geometry that actually falls inside the cell it was served for (which
+is what catches a mis-keyed bake). Cells expected to be thin are asserted thin, not
+dense: a desert track cell must have ≥1 way and must not 404, but demanding volume
+there would be asserting a lie about the terrain. Ocean cells must 404 — a 200 there
+is what "we published 200k empty tiles" looks like from outside.
+
+Exits non-zero on any failure, so it can gate a bake. Add probes when you add a
+slice; a slice with no probe is a slice nobody can prove.
 
 ## Whole-world first upload (local seed)
 
