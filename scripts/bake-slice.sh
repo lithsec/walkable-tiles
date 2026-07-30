@@ -240,6 +240,23 @@ upload_version v5 "$OUT/hashes-v5.json"
 aws s3 cp "$OUT/habitat-$NAME.jsonl" "s3://$R2_BUCKET/v5/habitat/$NAME.jsonl" \
   --content-type application/x-ndjson --only-show-errors
 
+# Landmark ANCHOR sidecar for the game server (SPEC §10.8) — one line per distinct anchor
+# the regional cap kept, which is tens per state and not the tens of thousands of tile
+# listings behind them. This is the artifact that makes a landmark creature bankable at
+# all: with no row here `record_claim` cannot verify the seed, and an unverifiable claim is
+# a creature the player finds, records and then loses at sync (docs/LANDMARK-SPAWNS.md
+# Option B, explicitly rejected).
+aws s3 cp "$OUT/landmarks-$NAME.jsonl" "s3://$R2_BUCKET/v5/landmarks/$NAME.jsonl" \
+  --content-type application/x-ndjson --only-show-errors
+
+# Habitat atlas for the CLIENT (SPEC §10.7) — under a kilobyte per slice, one object.
+# Unlike every other v5 artifact this one is fetched WHOLE and unconditionally, and that
+# is the point: "which way is the nearest woodland" asked as a query is a request whose
+# very existence leaks a direction, which is the same leak the sorted-neighbour-ring tile
+# prefetch was designed to close. A file every player already holds cannot leak it.
+aws s3 cp "$OUT/atlas-$NAME.json" "s3://$R2_BUCKET/v5/atlas/$NAME.json" \
+  --content-type application/json --only-show-errors
+
 # Per-slice build stamp. v4 fields keep their original names; v5 fields are additive.
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 jq -n --arg name "$NAME" --arg ts "$TS" \

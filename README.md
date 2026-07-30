@@ -70,6 +70,9 @@ walkable-tiles/
   v4/<latIdx>/<lngIdx>.json.gz   # one gzip-compressed v4 payload per data-bearing cell
   v5/hashes/<slice>.json     # same diff manifest, v5 tiles
   v5/habitat/<slice>.jsonl   # habitat sidecar — non-rural spawn cells (SPEC.md §10.4)
+  v5/landmarks/<slice>.jsonl # anchor sidecar — the few named things significant enough to
+                             #   hold a creature, after the regional cap (SPEC.md §10.8).
+                             #   Tens per state: vermont 12, district-of-columbia 1.
   v5/<latIdx>/<lngIdx>.json.gz   # v5 payload; v5-only cells exist (landcover with no ways)
 ```
 

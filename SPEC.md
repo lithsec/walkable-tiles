@@ -201,20 +201,26 @@ unchanged.
 
 ### 10.0 Revision 2 (2026-07) — still `v: 5`, and why
 
-Revision 2 adds eight landmark kinds (§10.2), an optional `ele` on a landmark, two optional
-per-way attributes (§10.6), and **splits the `green` habitat class into `woodland` and
-`greenspace`** (§10.3, §10.4). Nothing is removed and no key changes meaning, so **the
-version is not bumped** — this is additive over revision 1 in exactly the way v5 was
-additive over v4. A revision-1 client skips landmark kinds it does not know (its parser
-already whitelists), ignores way keys it does not read, and decodes an unknown habitat
-character to nothing. Three behaviour changes such a client *will* see, all degradation
-rather than breakage:
+Revision 2 adds eight landmark kinds (§10.2), an optional `ele` and an optional `anchor` on
+a landmark, two optional per-way attributes (§10.6), and **splits the `green` habitat class
+into `woodland` and `greenspace`** (§10.3, §10.4). Nothing is removed and no key changes
+meaning, so **the version is not bumped** — this is additive over revision 1 in exactly the
+way v5 was additive over v4. A revision-1 client skips landmark kinds it does not know (its
+parser already whitelists), ignores way keys it does not read, and decodes an unknown
+habitat character to nothing. Four behaviour changes such a client *will* see, all
+degradation rather than breakage:
 
 - `LANDMARKS_PER_TILE` rises 3 → 6. A revision-1 client that defensively clamps at 3 keeps
   the first three kinds it RECOGNISES, which are the same parks it lists today.
 - A protected area also tagged `leisure=nature_reserve` now classifies as `national_park`
   or `protected_area` instead of `nature_reserve` (§10.2 — every US national park checked
   is tagged this way). A revision-1 client skips the unknown kind and falls through.
+- **`national_park` now needs a footprint, not only a tag** (§10.2), so features a
+  revision-1 tile calls a national park mostly become `park` or `nature_reserve`. Measured:
+  the District's 37 promotions and Vermont's 3 all fall, to **zero** in both, which is the
+  true count for a city of NPS administrative units and a state with a national *forest*.
+  This is the one revision-2 change that MOVES features between kinds rather than adding
+  one, and it moves them toward the weaker, truer claim.
 - The habitat grid character `g` no longer appears; `w` and `p` replace it (§10.3). A
   revision-1 client reads both as unknown and the cell falls back to rural — it
   under-claims rather than mis-claims, which is why `g` is retired rather than re-spent.
@@ -225,10 +231,14 @@ field at once is that a tile is baked whole:** a field discovered missing later 
 entire bake again, and the bake gets an order more expensive with every slice added.
 
 Layout mirrors v4 everywhere: tiles at `v5/<latIdx>/<lngIdx>.json.gz`, hash
-manifests at `v5/hashes/<slice>.json`, plus one new slice-level artifact —
+manifests at `v5/hashes/<slice>.json`, plus three slice-level artifacts —
 `v5/habitat/<slice>.jsonl` (locally `out/habitat-<slice>.jsonl`), the habitat
-sidecar Ausculta's server ingests (§10.4). `serve-local.mjs` serves both
-prefixes. All constants below live in one place at the top of `tile.mjs`.
+sidecar Ausculta's **server** ingests (§10.4); `v5/atlas/<slice>.json`
+(locally `out/atlas-<slice>.json`), the ~1 KB habitat atlas its **client** holds
+whole (§10.7); and `v5/landmarks/<slice>.jsonl` (locally
+`out/landmarks-<slice>.jsonl`), the landmark **anchor** sidecar the server
+ingests (§10.8). `serve-local.mjs` serves both tile prefixes. All constants below
+live in one place at the top of `tile.mjs`.
 
 ### 10.1 `landcover` — polygons for parchment-watercolor washes
 
@@ -261,9 +271,11 @@ Processing (values normative):
 
 Only **named** features qualify; `name` is verbatim OSM. An entry is
 `{name, lat, lng, kind}`, plus `ele` (integer metres) on a `peak` that carries a
-parseable `ele` tag.
+parseable `ele` tag, plus `anchor: true` when this landmark is in the slice's anchor set
+(§10.8). `anchor` is **written only when true**; absent means "not an anchor as far as
+this tile knows", which is a weaker statement than it looks — see §10.8.
 
-**Vocabulary and tier.** The `kind` whitelist, with its TIER — the first sort key inside a
+**Vocabulary and tier.** The `kind` whitelist, with its TIER — the second sort key inside a
 tile. Matching is in this table's order, most specific tag first:
 
 | kind | tier | OSM |
@@ -271,19 +283,58 @@ tile. Matching is in this table's order, most specific tag first:
 | `city`, `town` | 0 | `place=city\|town` (NODE) |
 | `village`, `hamlet`, `suburb` | 1 | `place=village\|hamlet\|suburb` (NODE) |
 | `peak` | 2 | `natural=peak` (NODE), with `ele` when tagged |
-| `national_park` | 3 | `boundary=national_park`, **or** `boundary=protected_area` with `protect_class=2` or `protected_area=national_park` |
+| `national_park` | 3 | (`boundary=national_park`, **or** `boundary=protected_area` with `protect_class=2` or `protected_area=national_park`) **and footprint ≥ `NP_MIN_AREA_M2` (5×10⁷ m²)** |
 | `protected_area` | 3 | `boundary=protected_area` otherwise |
 | `park` | 4 | `leisure=park` |
 | `library` | 4 | `amenity=library` (area or NODE) |
 | `cemetery` | 4 | `landuse=cemetery` |
 | `nature_reserve` | 4 | `leisure=nature_reserve` |
 | `common` | 4 | `leisure=common` |
+| `protected_area` | 3 | `boundary=national_park` that failed the area test and matched nothing else |
 
 The `boundary` rows sit ABOVE `leisure` deliberately. Everglades, Grand Canyon and Zion
 are all tagged `boundary=protected_area` + `leisure=nature_reserve`, and **none** carries
 `boundary=national_park` — a `leisure` test placed first quietly classes every US national
 park as a local nature reserve. `protect_class=2` is IUCN category II ("National Park");
 Grand Canyon has only `protected_area=national_park`, so both signals are needed.
+
+**`national_park` needs a size as well as a tag, and the tags alone are worthless.**
+Measured on the district-of-columbia trial bake, 2026-07-30: the tag rule promoted **37**
+features, **all** of them `boundary=national_park`, and they are Dupont Circle (9,000 m²),
+Folger Park (7,000 m²), the Vietnam Veterans Memorial (9,000 m²) and "Anacostia Park
+Section D" (204,000 m²). `boundary=national_park` is an *administrative* tag: in the US the
+National Park Service puts it on everything it operates, down to a traffic circle.
+`protect_class=2` fails in the other direction — on the vermont trial it promoted three
+**state** parks (Niquette Bay, Mount Philo, Smuggler's Notch), and West Potomac Park
+carries it too.
+
+So a tag is necessary and nowhere near sufficient, and **area is the only lever that
+generalises past one country's tagging habits**. 5×10⁷ m² is roughly a 7 km square — the
+smallest thing that reads as somewhere you travel to and spend a day in — and it is 7× the
+largest NPS unit in the District (Rock Creek Park, 7.2 km²), so it is not tuned to squeak
+past one measurement. After the gate, `national_park` counts **0 in the District and 0 in
+Vermont**, which is the true answer for both: the District has NPS units and Vermont has a
+national *forest*.
+
+**What a refused feature becomes depends on which tag made the claim**, and the two are
+genuinely different:
+
+- `boundary=protected_area` says "protected area" *independently* of any national-park
+  claim, so a refused promotion leaves it exactly where it was. Vermont's three state parks
+  land on `protected_area`, where they belong. This row is unchanged.
+- `boundary=national_park` **is** the claim and says nothing else, so refusing it means the
+  tag carries no weight and whatever else the feature is tagged describes it better. Every
+  NPS unit in the District also carries `leisure=park`, so "Anacostia Park Section D"
+  becomes a `park` — which is what it is. Rock Creek Park, tagged `leisure=nature_reserve`,
+  becomes a `nature_reserve`. The final table row catches the handful with no other tag
+  (memorials) so that nothing **named** is silently dropped.
+
+**What the threshold costs, named.** Hot Springs NP (22 km²) and Gateway Arch NP (0.75 km²)
+will read as `park`/`protected_area`. And area cannot separate a National Park from a
+National Recreation Area of the same size — Golden Gate NRA (330 km²) will read as one.
+Both are accepted: the kind's promise is about **scale**, not about a US federal
+designation, and neither is a lie about the ground the way "Dupont Circle, National Park"
+is. Neither is measured here; both are from published acreage.
 
 **Position.** The node itself for point-mapped kinds (settlements, peaks, some libraries);
 the largest part's polygon centroid for area kinds.
@@ -308,9 +359,14 @@ the largest part's polygon centroid for area kinds.
   a mapping artefact, not a place, and falls back to proximity alone.
 
 **Ordering and truncation.** Deduped on `(kind, name)` keeping the largest footprint, then
-sorted by **tier ascending, footprint area descending, distance to the tile centre
-ascending, name ascending**, and truncated to **6** (`LANDMARKS_PER_TILE`). At most
+sorted by **anchor first, tier ascending, footprint area descending, distance to the tile
+centre ascending, name ascending**, and truncated to **6** (`LANDMARKS_PER_TILE`). At most
 **2** (`SETTLEMENTS_PER_TILE`) of those may be tier 0/1.
+
+Anchors sort ahead of tier because the tile is where a client *learns an anchor exists*, so
+an anchor truncated out of its own tile is an anchor nobody can ever spawn at. It costs
+almost nothing: there is at most one anchor per 0.5° cell (§10.8), so a 1.2 km tile
+carrying two is one sitting on a cell corner, and five slots remain either way.
 
 Tier before area is the whole point of the ordering: area alone is exactly backwards for
 the kinds this revision adds. A settlement node has NO footprint, so it sorted last and was
@@ -474,6 +530,13 @@ measurement after the first one:
   it `boundary=protected_area` — where this could plausibly add ~10^5 tiles, ~15 MB and
   ~$0.45 of Class-A writes. That is the price of a national park being visible from
   anywhere inside it rather than only near its centroid.
+- **The anchor flag and sidecar (§10.8) are free.** Measured on the trial bakes,
+  2026-07-30: `anchor: true` costs **+83 B** across the District's 188 v5 tiles and
+  **+17,756 B** across Vermont's 28,445 — 0.0005% and 0.012% of v5 bytes — because there
+  are 1 and 12 anchors respectively. The sidecars are 1 and 12 lines. Tile *counts* are
+  unchanged in both slices (188 and 28,445 before and after); what does change is the
+  re-upload set, since `national_park` reclassification and the anchor-first ordering
+  rewrite **70 of 188** District tiles and **1,891 of 28,445** Vermont tiles.
 
 ### 10.6 Per-way attributes — `lit` and `access`
 
@@ -507,3 +570,300 @@ the untagged majority, whereas a parallel array pays one slot per way either way
 **v4 is untouched.** v4's way objects are `{points, foot}`, spelled out field by field in
 `tile.mjs`'s v4 write loop; neither key can reach them. Verified by re-tiling the same
 input with the pre-revision tiler and diffing: `out/v4` and `hashes.json` are byte-identical.
+
+### 10.7 `atlas` — where a habitat class OCCURS, coarsely (Ausculta)
+
+Habitat affinity is authored on every Ausculta creature and today it is **invisible**: a
+player in a city may never meet a woodland creature and is never told why. The sentence
+this artifact exists to make possible is *"Mount Mansfield is not too far away — you might
+find mountainous creatures there."* Answering it needs to know **which habitat classes
+occur roughly where**, and nothing like per-cell resolution: Vermont's per-cell habitat
+sidecar is 5.3 MB and the same question answered at ~10 km is **693 bytes**.
+
+**It is a shipped static file, and that is a privacy decision, not a size one.** Ausculta's
+tile prefetch (`apps/mobile/src/tiles/cache.ts`) derives its request set from the CELL
+INDEX and never the raw position, and fires the whole neighbour ring on cell entry in
+sorted `(i, j)` order rather than nearest-boundary-first — so that everyone standing
+anywhere in a ~1.1 km cell emits byte-identical URLs, and request ORDER cannot reveal which
+way somebody is walking. *"What habitat is near me"* asked as a **query** throws all of
+that away in a single call, and worse: the request's very existence discloses a position
+and an intent, and no amount of care on the server side unsends it. An atlas every player
+already holds sidesteps the problem completely — the answer is computed on-device from data
+nobody had to ask for, and there is no request to observe. A whole state is under a
+kilobyte, so the entire United States is ~50 KB, small enough to ship inside the app binary
+if even the one CDN fetch is ever unwanted.
+
+Layout: `v5/atlas/<slice>.json` (locally `out/atlas-<slice>.json`), one object, no gzip —
+at this size the HTTP round-trip dominates and gzip would only cost a decode.
+
+**Blocks (normative).** A block is `blockCells = 64` × 64 spawn cells:
+
+```
+bx = floor(cx / 64)      by = floor(cy / 64)          floor toward −inf, NOT truncation
+```
+
+64 × 0.0015° = **0.096°**, ≈ 10.7 km north–south and 0.096°·cos(lat) east–west (7.7 km at
+Vermont's 43.9°, 8.3 km at DC's 38.9°). Block `(bx, by)` spans
+`lng ∈ [bx·0.096, (bx+1)·0.096)`, `lat ∈ [by·0.096, (by+1)·0.096)`.
+
+**Why 64 spawn cells and not 0.1°.** `0.1 / 0.0015 = 66.67`: a 0.1° block edge cuts
+*through* spawn cells, so which block a cell belongs to would depend on float rounding of
+the cell's centre — and Ausculta's server re-derives from this spec in plpgsql, where a
+disagreement of one block is a creature offered in the wrong place. 64 is exact, is a power
+of two, keeps the whole index in integers, and makes the atlas a strict coarsening of the
+*same* grid as §10.3 and §10.4 rather than a third coordinate system. The size is a trade
+against precision: bigger blocks are a smaller file and a vaguer "about 40 km north".
+
+**Encoding (normative).** One 6-bit class-occurrence mask per block, one **base64url**
+character per mask, over a **dense raster** of the slice's block bounding box:
+
+| bit | value | class |
+|---|---|---|
+| 0 | 1 | `urban` |
+| 1 | 2 | `residential` |
+| 2 | 4 | `woodland` |
+| 3 | 8 | `greenspace` |
+| 4 | 16 | `mountain` — **RESERVED, never set today** (§10.3: no elevation source) |
+| 5 | 32 | `rural` |
+
+```jsonc
+{
+  "v": 1, "slice": "vermont",
+  "cellDeg": 0.0015, "blockCells": 64,
+  "bx0": -765, "by0": 445, "cols": 21, "rows": 24,
+  "classes": ["urban","residential","woodland","greenspace","mountain","rural"],  // index i is bit 1<<i
+  "blocks": "…504 base64url characters…"
+}
+```
+
+`blocks` is `rows × cols` characters, **row-major, south→north** (`by` ascending is the
+outer loop), **west→east** within a row — the same order as §10.3's per-cell grid, one zoom
+out, so there is no second convention to learn. Index `= (by−by0)·cols + (bx−bx0)`.
+Alphabet is `A–Z a–z 0–9 - _` at indices 0–63; base64url rather than standard base64
+because `-`/`_` need no escaping in a JSON string, a URL path or a shell, whereas a `/`
+invites a `\/` from a defensive encoder and the raster stops round-tripping byte-for-byte.
+Six bits is exactly the class vocabulary's width including the reserved `mountain`, so a
+mask never needs a second character.
+
+Dense rather than a sparse `{blockKey: mask}` map: a JSON object entry costs ~20 B against
+1 B for a raster slot and a state's bbox is far more than 5% occupied (Vermont, a diagonal
+wedge, is 346/504 = 69%), so sparse loses by an order — and the query this exists to serve
+is *"walk outward from my block until one has bit X"*, which over a raster is index
+arithmetic with no hashing and no allocation.
+
+**Mask 0 means NO DATA — not "empty land".** It says this slice owns no classified spawn
+cell in that block. The block may be ocean, or it may be the next state and densely urban.
+A consumer that reads 0 as `rural` fabricates a wilderness out of a state line, which is
+the same abstention failure §10.6's absent `lit` exists to prevent. Off-raster is the same
+answer as mask 0.
+
+**Derivation (normative).** From the **slice-owned spawn cells** — §4's exactly-one-writer
+rule at spawn-cell granularity, cell *centre* inside the slice poly — classified by §10.4,
+in the same pass that writes the habitat sidecar. **Never from the per-tile habitat
+grids:** those include cells classified from the buffer geometry a Geofabrik extract
+carries from its neighbours, which reads Washington DC as 38% rural, a fact about Virginia
+and Maryland rather than about DC. A block's bit is set iff **at least one** owned cell in
+it has that class.
+
+The atlas records `rural`; the sidecar (§10.4) omits it. Not an inconsistency — the two pay
+for it differently. The sidecar is one *line* per cell and rural is the default, so listing
+it would multiply a 5 MB file by ten to say "nothing here". The atlas is a fixed-size
+raster where rural costs one *bit* that is already allocated, and without it the atlas could
+not answer "where is rural" at all — which in Vermont is 90% of the state and the single
+most likely habitat a player is standing in.
+
+**Occurrence, not dominance, and the noise floor that comes with it.** A bit means "at
+least one 167 m spawn cell", so one lone crossroads can make an 8 × 11 km block claim
+`urban`. Measured on Vermont: of the 54 blocks claiming urban, **16 (29.6%) rest on a
+single spawn cell**; woodland and greenspace are far steadier at 2.8% and 3.6%.
+`inspect-bake.mjs` prints this ratio per class precisely because it is the number that
+decides whether a minimum-cell threshold is wanted, and that decision has deliberately
+**not** been taken here — occurrence is the semantics the feature asks for ("could a
+woodland creature be there at all"), and a threshold would silently delete real small
+woods. A consumer that needs confidence should prefer a class with a low thin-block ratio,
+or wait for a threshold to be specified.
+
+**Measured, first bake (2026-07, `--trial`, nothing uploaded):**
+
+| slice | file | occupied blocks | raster | B / occupied block |
+|---|---|---|---|---|
+| vermont | **693 B** | 346 | 21 × 24 = 504 | 2.0 |
+| district-of-columbia | **209 B** | 6 | 3 × 3 = 9 | 34.8 |
+
+Both are dominated by the ~180 B header at DC's size, which is the honest shape of the
+trade: the atlas is cheap per block and the fixed cost only matters for a slice smaller
+than a few blocks. **DC is smaller than 3 blocks across, and all 6 of its occupied blocks
+carry all 5 classes** — the atlas's truthful answer inside DC is "everything is here", and
+the feature's answer there is "you are already in it". Vermont is where it says something:
+54 blocks with urban against 346 with rural, urban present in the blocks containing
+Burlington, Montpelier, Rutland and Brattleboro and absent from the blocks containing
+Mount Mansfield and Killington Peak, which both carry `woodland`.
+
+**Verification.** `inspect-bake.mjs` cross-checks the atlas against the habitat sidecar
+**by value**, block for block: every non-rural bit the sidecar's cells imply must be set in
+the atlas and no non-rural bit may be set without a sidecar cell backing it. An atlas built
+from the tile grids instead would disagree exactly at a state line, and `typeof atlas ===
+'object'` would never notice. Both trial slices report `AGREES — 0 missing bits, 0 unbacked
+bits, 0 sidecar blocks off-raster`.
+
+**How a client answers "where is the nearest woodland".** Read `blocks`, find your own
+block from your `(cx, cy)`, and walk outward in rings of increasing Chebyshev radius until
+a block has the bit. Distance is `ring · 0.096°` in the relevant axis, which at ~10 km
+granularity supports "about 30 km north-east" and nothing finer — say it that loosely.
+Nothing is fetched, so nothing is disclosed.
+
+### 10.8 `landmarks` sidecar — the slice's ANCHOR set (Ausculta)
+
+`v5/landmarks/<slice>.jsonl` (locally `out/landmarks-<slice>.jsonl`). One line per
+**distinct anchor**, sorted by `key` ascending:
+
+```jsonc
+{"key":"peak@44543947,-72814310","kind":"peak","lat":44.543947,"lng":-72.81431,"ele":1340,"name":"Mount Mansfield"}
+```
+
+`ele` is present only when the anchor is a `peak` carrying one. `name` is here and is
+deliberately **not** in the server's table sketch (`docs/LANDMARK-SPAWNS.md` Option A): the
+sidecar is the only artifact outside the tiles holding the key→name mapping, and an
+operator reading `peak@44543947,-72814310` in a log needs to be able to tell it is Mount
+Mansfield without re-baking a state.
+
+This is the artifact that makes a landmark creature **bankable**. Ausculta's `record_claim`
+is the only write path to `claims` and it re-derives every spawn; with no anchor row it
+cannot verify a landmark seed, and an unverifiable claim is a creature the player finds,
+records and then loses at sync. The full argument, and the two alternatives that were
+rejected, are in `docs/LANDMARK-SPAWNS.md`.
+
+**Three requirements, all normative.**
+
+1. **One line per DISTINCT anchor, never one per tile listing.** Proximity and containment
+   binning list the same feature from every tile it touches: measured on the
+   district-of-columbia trial, 983 tile listings were 246 distinct places, and the raw
+   pre-truncation set was 1,183 listings over 242. The dedupe happens in the bake, where
+   the whole slice is in scope — never client-side, where the set is already truncated to
+   six per tile.
+2. **Slice-owned, exactly-one-writer (§4), at ANCHOR granularity.** An anchor is emitted
+   iff its own point is inside the slice poly. Ownership is applied **before** the ranking,
+   not after: ranking first would make the result depend on how much of the neighbouring
+   state a Geofabrik extract's buffer happened to include, and the same anchor could then
+   be ranked in from one slice and out from another.
+3. **The `key` is emitted by the bake and must never be recomputed by the ingester.** It is
+   `<kind>@<latE6>,<lngE6>` in integer micro-degrees, built from the same rounded lat/lng
+   the tile carries. Keyed on the POINT, not the name: `Math.round(lat * 1e6)` and
+   plpgsql's `round(lat * 1e6)` are the same integer with nothing in between, whereas a
+   name hash diverges between JS UTF-16 code units and Postgres code points above U+FFFF —
+   it would ship green and fire in whichever country first maps a landmark with an
+   astral-plane character in its name.
+
+#### Significance, and why there is a second cap at all
+
+`LANDMARKS_PER_TILE` (§10.2) answers "what fits on the drawn page". This answers a
+different question — *which named things are significant enough to hold a creature* — and
+it has to be answered over a **region**, because significance is comparative. Measured:
+vermont produced **1,291 distinct named summits**, the District **341 park listings over
+121 distinct parks**. Neither is a collection; both are a spreadsheet.
+
+The target is **~15 anchors per ~100 km of walking radius**, area-normalised:
+`ANCHOR_DENSITY_PER_KM2 = 15 / (π · 100²) = 4.775×10⁻⁴`. Per slice would be wrong twice
+over — it would hand Vermont and California the same number, and it would make the count an
+artefact of where a bake was cut rather than a fact about the ground.
+
+**Significance score.** `sig = log2(magnitude / reference)` — a number of *doublings* above
+the magnitude at which a feature of that kind starts being worth naming. Ratios, not units,
+is what makes a cemetery comparable to a national park with no hand-set per-kind prior.
+
+| kind | reference magnitude (`LANDMARK_SIG_REF_M2`) |
+|---|---|
+| `national_park` | 5×10⁷ m² — the promotion threshold itself, so the smallest surviving national park scores exactly 0 |
+| `protected_area` | 5×10⁶ m² |
+| `nature_reserve` | 5×10⁵ m² |
+| `park`, `common` | 1×10⁵ m² |
+| `cemetery` | 5×10⁴ m² |
+| `library` | 1×10⁴ m² |
+| `peak` | `ele`, see below |
+| `city`, `town`, `village`, `hamlet`, `suburb` | **`null` — abstain** |
+
+The area references are read off the measured trial distributions: park p90 is 64,602 m²
+(DC) and 160,686 m² (VT); cemetery p50 24,343 and 6,575; nature_reserve p50 121,513 and
+234,103; protected_area p50 1,025,794 (VT). `library` is 1 ha because a library is a
+*building* and most are nodes with no footprint at all — at the 1,000 m² a branch library
+occupies, the District's Madison Building scored 4.23 and won the entire District, which is
+how that number got measured rather than guessed.
+
+**Settlements abstain**, and §10.2 already says why in its own words: a settlement is
+carried as its centre NODE with a proximity radius and that "is not a claim of membership".
+A point that does not locate the thing at walking scale cannot anchor a creature to it, so
+spending a cell's one anchor on `city@Washington` spends it on an arbitrary downtown
+intersection.
+
+**A summit is scored from `ele`, and the bridge to an area is dimensional.** At a fixed
+hillside slope a summit of height *h* has a footprint ∝ *h*², so `log2` of that footprint is
+`2·log2(h)` — the slope cancels out of the ranking entirely and only a reference height
+survives:
+
+> `sig(peak) = 2 · log2(ele / PEAK_ELE_REF_M)`, `PEAK_ELE_REF_M = 105`.
+
+105 m is where a named summit becomes a locally notable high point: the District's 17 named
+summits run 28–123 m (median 56), so its own best hills score around zero, which is what a
+reference is supposed to mean.
+
+**The limitation, stated.** `ele` is height above **sea level**, not prominence, and this
+bake has no elevation source to subtract a base from — the same gap that leaves the `m`
+habitat character reserved and unemitted (§10.3). Comparisons are only ever made *within
+one anchor cell*, where the valley floor is near enough constant for this to hold; across a
+continent it is not, and a 1,700 m bump on the Colorado plateau will out-score a city park
+it has no business out-scoring. When Copernicus relief lands, this is the line that changes.
+
+#### The cap — three terms, each doing a job the other two cannot
+
+1. **RANK** by `sig` descending, ties broken by `key` ascending, so a re-bake of unchanged
+   data produces the identical set.
+2. **SPREAD** — at most one anchor per `ANCHOR_CELL_DEG` = **0.5°** cell
+   (`floor(lat/0.5)`, `floor(lng/0.5)`). Without it the count cap alone picks the five
+   highest points on one mountain: Vermont's top summits by `ele` are Mansfield 1340, Adams
+   Apple 1256, Lower Lip 1256, The Nose 1225, Upper Lip 1208 — four of which are named
+   sub-summits *of* Mansfield, all within 2 km of it. 0.5° is ~46 km north-south and
+   `sqrt(1 / ANCHOR_DENSITY_PER_KM2)` is 45.8 km, so the cell **is** the density expressed
+   as a distance; the two terms agree by construction rather than by tuning, and the cell
+   nests exactly in whole degrees.
+3. **COUNT** — `max(1, round(ANCHOR_DENSITY_PER_KM2 × sliceAreaKm2))`. The area is
+   integrated by the same scanline and the same even-odd rule as `pointInRings`, so
+   "inside" means here exactly what it means to `owns()`; a spherical-shoelace formula
+   would instead have to agree with the winding of every Geofabrik `.poly`, and one `!hole`
+   ring taken the wrong way round would be a silent factor of two in the count. Vermont
+   integrates to 24,991 km² against a published 24,923 (+0.3%).
+
+Plus `ANCHOR_SIG_MIN = 0`: an anchor must also *be* significant, not merely the least
+insignificant thing nearby. The floor of 1 in term 3 and this minimum pull in opposite
+directions on purpose — the floor says every slice gets its best thing, the minimum says
+only if that thing is significant at all. A slice with nothing above its kinds' references
+emits an **empty** sidecar, and that is an answer rather than a failure. It does not bind on
+either trial slice; the count cap binds first in both.
+
+**Measured, 2026-07-30.** Vermont: 2,687 owned candidates, 1,398 above the floor, area
+24,991 km² ⇒ cap 12, and the 12 are — Green Mountain National Forest, Mount Mansfield
+(1340 m), Killington Peak (1293), Camels Hump (1243), Equinox Mountain (1169), Glastenbury
+Mountain (1139), Mount Snow (1092), East Mountain (1045), Signal Mountain (1013), Mt
+Ascutney (954), Gilpin Mountain (919), Herrick Mountain (828). District of Columbia: 328
+candidates, 37 above the floor, area 186 km² ⇒ cap 1 — the U.S. National Arboretum.
+
+**A city gets very few anchors, and that is the stated density doing its job**, not a bug:
+at 15 per 31,416 km² the District's 186 km² earns 0.09, and it gets 1 only because of the
+floor. If a dense city should feel like it has landmarks, the knob is
+`ANCHORS_PER_100KM_RADIUS` and it moves globally.
+
+#### Border behaviour, and what the tile flag is worth
+
+Ownership is per slice, so a 0.5° cell straddling a state line is ranked twice — once by
+each slice, over its own half — and can therefore hold **two** anchors rather than one. The
+excess is bounded at one per (slice, cell) and it is the price of every slice being
+reproducible from its own extract alone, which §4 already pays elsewhere for the same
+reason. It also means a tile near a border can list a landmark this slice never ranked, so
+the `anchor: true` flag of §10.2 will be **absent** on an entry the neighbouring slice does
+anchor. That degrades to a **gap** — the client derives no spawn — and never to a
+fabrication, which is the direction every other truncation in this format fails in. The
+sidecar, not the tile flag, is the authority.
+
+**Size.** Vermont 12 lines, the District 1. Extrapolating the density: ~4,700 rows for the
+continental US and ~7×10⁴ globally, against the habitat sidecar's 277k *non-rural cells per
+state*. It is a small table, and the per-tile payload cost is `+83 B` over the District's
+188 tiles and `+17,756 B` over Vermont's 28,445 — 0.0005% and 0.012% of v5 bytes.

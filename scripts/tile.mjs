@@ -18,7 +18,9 @@
 // Output: <out>/v4/<i>/<j>.json.gz  +  <out>/hashes.json  (cellKey -> sha256 of the
 // uncompressed JSON, used by bake-slice.sh to upload only changed tiles), and the
 // same pair for v5 (<out>/v5/…, <out>/hashes-v5.json), plus the habitat sidecar
-// <out>/habitat-<slice>.jsonl (one line per non-rural spawn cell — SPEC.md §10.4).
+// <out>/habitat-<slice>.jsonl (one line per non-rural spawn cell — SPEC.md §10.4) and the
+// landmark anchor sidecar <out>/landmarks-<slice>.jsonl (one line per DISTINCT anchor the
+// regional cap kept — SPEC.md §10.8).
 //
 // Usage: node tile.mjs --out <dir> [--slice <name>] [--poly <file> | --bbox minLng,minLat,maxLng,maxLat]
 // Ownership: a cell is WRITTEN by this slice iff its center is inside the poly/bbox,
@@ -87,6 +89,115 @@ const isSettlement = (kind) => LANDMARK_TIER[kind] <= 1;
 // A pathological protected_area spanning an ocean must not turn into a 10^6-cell loop;
 // above the cap the landmark falls back to centroid-proximity binning alone.
 const LM_COVER_MAX_CELLS = 200000;
+
+// ---- landmark significance and the regional anchor cap (SPEC §10.2, §10.8) -----------
+//
+// WHY THERE IS A SECOND CAP AT ALL. LANDMARKS_PER_TILE answers "what fits on the drawn
+// page"; it is a per-tile budget and it stays exactly as it was. This one answers a
+// different question — "which named things are significant enough to hold a creature" —
+// and it has to be answered over a REGION, because significance is comparative. Measured
+// on trial bakes: vermont produced 1,291 distinct named summits and the District 341
+// distinct parks. Neither is a collection; both are a spreadsheet.
+//
+// The owner's call is ~15 anchors per ~100 km of walking radius, AREA-NORMALISED. Per
+// slice would be wrong twice over: it would hand Vermont and California the same number,
+// and it would make the count an artefact of where a bake was cut rather than a fact about
+// the ground.
+const ANCHORS_PER_100KM_RADIUS = 15;
+const ANCHOR_DENSITY_PER_KM2 = ANCHORS_PER_100KM_RADIUS / (Math.PI * 100 * 100); // 4.775e-4
+// Spatial spread: at most ONE anchor per cell of this size. Without it the count cap alone
+// picks the five highest points on one mountain — measured, Vermont's top summits by `ele`
+// are Mansfield 1340, Adams Apple 1256, Lower Lip 1256, The Nose 1225, Upper Lip 1208, of
+// which four are named sub-summits OF Mansfield, all within 2 km of it. 0.5° is ~46 km
+// north-south, and sqrt(1 / ANCHOR_DENSITY_PER_KM2) is 45.8 km: the cell IS the density
+// expressed as a distance, so the two terms agree by construction rather than by tuning,
+// and the cell nests exactly in whole degrees.
+const ANCHOR_CELL_DEG = 0.5;
+// An anchor must also BE significant, not merely the least insignificant thing nearby.
+// 0 is "at the reference magnitude for its own kind" (LANDMARK_SIG_REF_M2 below), so this
+// is the abstention half of the rule: a slice whose best named thing is a 2,000 m² lot
+// emits no anchor rather than promoting the lot. It does NOT bind on either trial slice —
+// the count cap binds first in both — and that is worth saying plainly rather than letting
+// a reader assume it was measured.
+const ANCHOR_SIG_MIN = 0;
+// Latitude step for the slice-area integral that sets the anchor count. It is a scanline,
+// so the cost is rows × ring points; 0.05° is ~5.6 km and lands Vermont at 24,991 km²
+// against a published 24,923 (+0.3%), far inside the rounding of `round(density × area)`.
+const SLICE_AREA_STEP_DEG = 0.05;
+// The magnitude at which a feature of each kind becomes LOCALLY NOTABLE — the unit its
+// significance is measured in. `null` means the kind is not anchorable at all.
+//
+// Significance is log2(magnitude / reference), so a score is a number of DOUBLINGS above
+// the point where a thing of that kind starts being worth naming. That is what makes a
+// cemetery comparable to a national park without either needing a hand-set prior. The
+// values are read off the measured distributions of the two trial slices: park p90 is
+// 64,602 m² in the District and 160,686 m² in Vermont (ref 1e5); cemetery p50 24,343 and
+// 6,575 (ref 5e4); nature_reserve p50 121,513 and 234,103 (ref 5e5); protected_area p50
+// 1,025,794 in Vermont (ref 5e6).
+//
+// SETTLEMENTS ABSTAIN, and the bake already says why in its own words a few constants up:
+// a settlement is carried as its centre NODE with a proximity radius, and that "is not a
+// claim of membership". A point that does not locate the thing at walking scale cannot
+// anchor a creature to it, so spending a cell's single anchor on `city@Washington` would
+// spend it on one arbitrary downtown intersection.
+//
+// national_park's reference IS its promotion threshold (NP_MIN_AREA_M2), so the smallest
+// feature that survives promotion scores exactly 0.
+const LANDMARK_SIG_REF_M2 = {
+  city: null,
+  town: null,
+  village: null,
+  hamlet: null,
+  suburb: null,
+  peak: null, // scored from `ele` instead — see landmarkSig()
+  national_park: 5e7,
+  protected_area: 5e6,
+  park: 1e5,
+  nature_reserve: 5e5,
+  common: 1e5,
+  cemetery: 5e4,
+  // A library is a BUILDING, and most are mapped as nodes with no footprint at all. 1 ha is
+  // a main-library footprint; the District's largest, the Madison Building at 18,770 m²,
+  // then scores 0.91 and sits below any real park. At the 1,000 m² a branch library
+  // occupies it scored 4.23 and won the entire District, which is how this number got
+  // measured rather than guessed.
+  library: 1e4,
+};
+// A summit's significance comes from `ele`, and the bridge to an area is dimensional: at a
+// fixed hillside slope a summit of height h has a footprint ∝ h², so log2 of that footprint
+// is 2·log2(h) and the slope cancels out of the ranking entirely. Only the reference height
+// survives, and 105 m is where a named summit becomes a locally notable high point — the
+// District's 17 named summits run 28–123 m, so its own best hills score around zero, which
+// is exactly what a reference is supposed to mean.
+//
+// THE LIMITATION, STATED: `ele` is height above SEA LEVEL, not prominence, and this bake
+// has no elevation source to subtract a base from — the same gap that leaves the `m`
+// habitat character reserved and unemitted (SPEC §10.3). Comparisons are only ever made
+// WITHIN one ANCHOR_CELL_DEG cell, where the valley floor is near enough constant for this
+// to hold; across a continent it is not, and a 1,700 m bump on the Colorado plateau will
+// out-score a city park it has no business out-scoring. When Copernicus relief lands, this
+// is the line that changes.
+const PEAK_ELE_REF_M = 105;
+// `boundary=national_park` is an ADMINISTRATIVE tag, not a claim about scale, and in the US
+// the National Park Service puts it on everything it operates. Measured in the District:
+// all 37 features the old rule promoted carry it, and they are Dupont Circle (9,000 m²),
+// Folger Park (7,000 m²), the Vietnam Veterans Memorial (9,000 m²) and "Anacostia Park
+// Section D". `protect_class=2` fails in the other direction: Vermont's three promotions
+// were all STATE parks tagged IUCN category II, and West Potomac Park carries it too.
+//
+// So a tag is necessary and nowhere near sufficient, and AREA is the only lever that
+// generalises past one country's tagging habits. 50 km² is roughly a 7 km square — the
+// smallest thing that reads as somewhere you travel to and spend a day in — and it is 7×
+// the largest NPS unit in the District (Rock Creek Park, 7.2 km²), so it is not a number
+// tuned to squeak past one measurement.
+//
+// WHAT IT COSTS, NAMED: Hot Springs NP (22 km²) and Gateway Arch NP (0.75 km²) will read as
+// `park`/`protected_area`. And area cannot separate a National Park from a National
+// Recreation Area of the same size — Golden Gate NRA (330 km²) will read as one. That is
+// accepted: the badge's promise is about SCALE, and neither of those is a lie about the
+// ground the way "Dupont Circle, National Park" is.
+const NP_MIN_AREA_M2 = 5e7;
+
 // OSM `lit` -> boolean, for the values that are UNAMBIGUOUS. Everything else — `limited`,
 // `interval`, `seasonal`, an unrecognised value, or no tag at all — is OMITTED rather than
 // guessed. Absent means UNKNOWN and must never be read as "unlit": this field exists to
@@ -128,6 +239,29 @@ const HAB = {
 // GLO-30, regional relief). Reserving the character now is free; the named peaks with
 // `ele` that revision 2 adds are that classifier's calibration set.
 const HAB_CODE = { urban: 'u', residential: 'r', woodland: 'w', greenspace: 's', rural: '.' };
+
+// ---- habitat atlas (SPEC §10.7) — which classes OCCUR in each coarse block ----------
+// A block is ATLAS_BLOCK_CELLS × ATLAS_BLOCK_CELLS spawn cells:
+//     bx = floor(cx / 64)     by = floor(cy / 64)     (floor toward −inf, not truncation)
+// 64 × 0.0015° = 0.096°, ≈ 10.7 km north-south, and 0.096°·cos(lat) east-west — 7.7 km at
+// Vermont's 44°N, 8.3 km at DC's 39°N.
+//
+// Blocks are defined on the SPAWN-CELL grid rather than on a round decimal like 0.1°,
+// because 0.1 / 0.0015 = 66.67: a 0.1° block edge cuts through spawn cells, and which
+// block a cell belongs to would then depend on float rounding of the cell's centre. 64 is
+// exact, is a power of two, and keeps the whole index in integers — which matters because
+// Ausculta's server re-derives from this spec in plpgsql, where a disagreement of one
+// block is a creature that spawns in the wrong state.
+const ATLAS_BLOCK_CELLS = 64;
+// One BIT per habitat class, one base64url CHARACTER per block. Six bits is exactly the
+// class vocabulary's width — including the `mountain` this bake reserves and does not
+// emit — so the mask never needs a second character. Key order here IS bit order, and is
+// what the artifact publishes as `classes`.
+const ATLAS_BIT = { urban: 1, residential: 2, woodland: 4, greenspace: 8, mountain: 16, rural: 32 };
+// base64url, not standard base64: `-`/`_` need no escaping anywhere the atlas travels
+// (JSON string, URL path, shell), whereas `/` invites a `\/` from a defensive encoder and
+// then the raster no longer round-trips byte-for-byte.
+const ATLAS_B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 
 // ---- args ----
 const argv = process.argv.slice(2);
@@ -239,7 +373,12 @@ function addCrossing(lat, lng) {
 // by landcover-only or landmark-only cells — v4 output stays byte-identical.
 const lcPolys = []; // { cls, rings:[[ [lng,lat], … ]…] } — rings open (no dup last), [0]=outer
 const lcByCell = new Map(); // tileKey -> [lcPolys index]  (clipped lazily at write time)
-const lmByCell = new Map(); // tileKey -> [{ name, lat, lng, kind, area }]
+const lmByCell = new Map(); // tileKey -> [{ name, lat, lng, kind, area, ele, key }]
+const anchorCands = new Map(); // anchorKey -> { key, kind, lat, lng, ele, sig, name } —
+//                                one entry per DISTINCT anchor point owned by this slice,
+//                                which is what the sidecar counts (SPEC §10.8). A landmark
+//                                is listed from every tile that reaches it; it is a
+//                                candidate exactly once.
 const hab = new Map(); // `${cx}:${cy}` (Ausculta cellId order: cx=lng, cy=lat) ->
 //                        { foot, res, road, wmask, gmask } — meters per way group + the
 //                        2x2 cover-sample bits, wood and green kept APART (SPEC §10.4)
@@ -266,12 +405,30 @@ function landcoverClass(pr) {
 // classed every US national park as a local nature reserve. `protect_class=2` is IUCN
 // category II ("National Park") and `protected_area=national_park` is the US tagging;
 // Grand Canyon has only the latter, Everglades and Zion have both.
-function landmarkKind(pr) {
-  if (pr.boundary === 'national_park') return 'national_park';
-  if (pr.boundary === 'protected_area')
-    return pr.protect_class === '2' || pr.protected_area === 'national_park'
-      ? 'national_park'
-      : 'protected_area';
+//
+// `national_park` now needs AREA as well as a tag (NP_MIN_AREA_M2 — see the measurements
+// there). What happens to a feature whose national-park claim is REFUSED depends on which
+// tag made the claim, and the two are genuinely different:
+//
+//   • `boundary=protected_area` says "protected area" INDEPENDENTLY of the claim, so a
+//     refused promotion leaves it exactly where it was — this line is unchanged, and
+//     Vermont's three state parks land on `protected_area` where they belong.
+//   • `boundary=national_park` IS the claim and says nothing else, so refusing it means the
+//     tag carries no weight at all and whatever else the feature is tagged describes it
+//     better. Every NPS unit in the District also carries `leisure=park`, so "Anacostia
+//     Park Section D" becomes a `park` — which is what it is. The last line catches the
+//     handful with no other tag (memorials) so that nothing NAMED is silently dropped.
+//
+// `areaM2` is 0 for nodes and for the candidacy call made before an area is known; that is
+// safe because area can only ever PROMOTE, so a zero-area call returns non-null on exactly
+// the same features a full one does.
+function landmarkKind(pr, areaM2) {
+  const npClaim =
+    pr.boundary === 'national_park' ||
+    (pr.boundary === 'protected_area' &&
+      (pr.protect_class === '2' || pr.protected_area === 'national_park'));
+  if (npClaim && areaM2 >= NP_MIN_AREA_M2) return 'national_park';
+  if (pr.boundary === 'protected_area') return 'protected_area';
   if (pr.natural === 'peak') return 'peak';
   if (PLACE_KINDS.has(pr.place)) return pr.place;
   if (pr.leisure === 'park') return 'park';
@@ -279,8 +436,37 @@ function landmarkKind(pr) {
   if (pr.landuse === 'cemetery') return 'cemetery';
   if (pr.leisure === 'nature_reserve') return 'nature_reserve';
   if (pr.leisure === 'common') return 'common';
+  if (pr.boundary === 'national_park') return 'protected_area';
   return null;
 }
+
+// How significant a landmark is, in doublings above its kind's locally-notable reference
+// (LANDMARK_SIG_REF_M2). `null` means the kind cannot anchor a creature at all.
+//
+// -Infinity is a real answer and not a bug: a peak with no `ele` and an area kind whose
+// parts all fell under LC_MIN_AREA_M2 have no magnitude to measure, so they sort below
+// everything that does and below ANCHOR_SIG_MIN. An unmeasured thing is not a small thing,
+// but it is not evidence of a large one either, and this cap is spending scarce slots.
+function landmarkSig(kind, areaM2, ele) {
+  if (kind === 'peak')
+    return typeof ele === 'number' ? 2 * Math.log2(Math.max(ele, 1) / PEAK_ELE_REF_M) : -Infinity;
+  const ref = LANDMARK_SIG_REF_M2[kind];
+  if (ref == null) return null;
+  return areaM2 > 0 ? Math.log2(areaM2 / ref) : -Infinity;
+}
+
+// The anchor identity, and it is the COORDINATE, not the name (docs/LANDMARK-SPAWNS.md
+// §"Identity is the coordinate"). Integer micro-degrees, because `Math.round(lat * 1e6)`
+// and plpgsql's `round(lat * 1e6)` are the same integer with nothing in between, whereas a
+// name hash diverges between JS UTF-16 code units and Postgres code points above U+FFFF —
+// it would ship green and fire in whichever country first maps a landmark with an
+// astral-plane character in its name.
+//
+// Built from the ROUNDED lat/lng the tile itself carries, so the client can recompute the
+// key of an entry it read and get the same string. It is emitted by the bake all the same;
+// the ingester must never recompute it.
+const anchorKey = (kind, lat6, lng6) =>
+  `${kind}@${Math.round(lat6 * 1e6)},${Math.round(lng6 * 1e6)}`;
 
 // OSM `ele` -> integer metres, peaks only. Values carry units and separators in the wild
 // ("3581", "3581 m", "1,234"), so parse the leading float and refuse anything outside the
@@ -375,12 +561,25 @@ function ringCentroid(ring) {
 // Keeping the proximity term as well means nothing that ships today stops shipping — a
 // small polygon containing no tile center at all still gets its neighbourhood.
 function addLandmark(name, lat, lng, kind, area, ele, radiusM, coverRings) {
+  const key = anchorKey(kind, round6(lat), round6(lng));
+  // Anchor candidacy is decided HERE, once per feature, on the slice's own ownership rule
+  // (SPEC §4) applied to the landmark's POINT — never to the tiles it happens to be listed
+  // in, which is a much larger and slice-overlapping set. Ownership is applied BEFORE the
+  // ranking, not after, so the anchor set is a function of this slice's extract alone and
+  // reproduces from it; ranking first and filtering after would make the result depend on
+  // how much of the neighbouring state a Geofabrik extract's buffer happened to include.
+  const sig = landmarkSig(kind, area, ele);
+  if (sig !== null && ownsLatLng(lat, lng)) {
+    const prev = anchorCands.get(key);
+    if (!prev || sig > prev.sig)
+      anchorCands.set(key, { key, kind, lat: round6(lat), lng: round6(lng), ele, sig, name });
+  }
   const keys = new Set(cellsNear(lat, lng, radiusM ?? BOX_HALF_M));
   if (coverRings) for (const k of cellsInsideRings(coverRings)) keys.add(k);
   for (const k of keys) {
     let list = lmByCell.get(k);
     if (!list) lmByCell.set(k, (list = []));
-    list.push({ name, lat, lng, kind, area, ele });
+    list.push({ name, lat, lng, kind, area, ele, key });
   }
 }
 
@@ -535,7 +734,9 @@ function rasterizeCover(rings, field) {
 }
 
 // Landcover/landmark area feature: simplify + area-threshold each polygon, then bin.
-function addArea(g, cls, kind, name) {
+// `pr` is carried through only so the landmark KIND can be settled once `totalArea` is
+// known — `national_park` is the one kind whose tags are not enough on their own.
+function addArea(g, cls, kind, name, pr) {
   const polys = g.type === 'Polygon' ? [g.coordinates] : g.coordinates;
   let totalArea = 0;
   let best = null; // largest outer ring, for the landmark centroid
@@ -570,7 +771,11 @@ function addArea(g, cls, kind, name) {
   }
   if (kind && name && best) {
     const c = ringCentroid(best);
-    addLandmark(name, c.lat, c.lng, kind, totalArea, undefined, BOX_HALF_M, coverRings);
+    // Re-ask now that the footprint is known. The candidacy call above used area 0 and can
+    // only ever have under-claimed (area promotes, never demotes), so this cannot turn a
+    // landmark into a non-landmark — it can only settle national_park.
+    const settled = landmarkKind(pr, totalArea) ?? kind;
+    addLandmark(name, c.lat, c.lng, settled, totalArea, undefined, BOX_HALF_M, coverRings);
   }
 }
 
@@ -609,7 +814,7 @@ for await (let line of rl) {
     // POINT landmarks were already the path for `n/amenity=library`, so settlements and
     // peaks — which OSM maps as nodes, not areas — need no new machinery, only a radius.
     // Area 0 is what made them fragile: see LANDMARK_TIER.
-    const kind = landmarkKind(pr);
+    const kind = landmarkKind(pr, 0);
     if (kind && pr.name)
       addLandmark(
         pr.name,
@@ -623,8 +828,8 @@ for await (let line of rl) {
       );
   } else if (g.type === 'Polygon' || g.type === 'MultiPolygon') {
     const cls = landcoverClass(pr);
-    const kind = landmarkKind(pr);
-    if (cls || (kind && pr.name)) addArea(g, cls, kind, pr.name || null);
+    const kind = landmarkKind(pr, 0);
+    if (cls || (kind && pr.name)) addArea(g, cls, kind, pr.name || null, pr);
   }
 }
 
@@ -731,6 +936,19 @@ function buildLandcover(i, j, idxs) {
 // Within a tier: area descending (unchanged for the pre-existing kinds), then distance to
 // the tile centre ascending — the meaningful key for the zero-area point kinds, and a
 // deterministic tiebreak for the rest in place of the old name-only one.
+//
+// ANCHORS SORT FIRST, ahead of tier, and carry `anchor: true`. The tile is where a client
+// learns an anchor exists, so an anchor truncated out of its own tile is an anchor no
+// client can ever spawn at — the exact "a downtown tile whose six slots are full of parks
+// silently drops a peak" failure docs/LANDMARK-SPAWNS.md §3 records. It costs almost
+// nothing: there is at most one anchor per 0.5° cell, so a 1.2 km tile carrying two is one
+// sitting on a cell corner, and five slots remain either way.
+//
+// The flag is a HINT and never the authority — `v5/landmarks/<slice>.jsonl` is (SPEC
+// §10.8). A tile near a slice border can list a landmark this slice does not own and
+// therefore never ranked, so the flag will be absent on an entry the neighbouring slice
+// does anchor. That degrades to a GAP (the client derives no spawn) and never to a
+// fabrication, which is the direction every other truncation in this format fails in.
 function buildLandmarks(i, j, list) {
   if (!list) return [];
   const byId = new Map();
@@ -741,9 +959,10 @@ function buildLandmarks(i, j, list) {
   }
   const c = cellCenter(i, j);
   const ranked = [...byId.values()]
-    .map((lm) => ({ lm, dist: haversineM(c.lat, c.lng, lm.lat, lm.lng) }))
+    .map((lm) => ({ lm, dist: haversineM(c.lat, c.lng, lm.lat, lm.lng), anchor: anchorKeys.has(lm.key) }))
     .sort(
       (a, b) =>
+        (b.anchor ? 1 : 0) - (a.anchor ? 1 : 0) ||
         LANDMARK_TIER[a.lm.kind] - LANDMARK_TIER[b.lm.kind] ||
         b.lm.area - a.lm.area ||
         a.dist - b.dist ||
@@ -751,11 +970,12 @@ function buildLandmarks(i, j, list) {
     );
   const out = [];
   let settlements = 0;
-  for (const { lm } of ranked) {
+  for (const { lm, anchor } of ranked) {
     if (out.length >= LANDMARKS_PER_TILE) break;
     if (isSettlement(lm.kind) && ++settlements > SETTLEMENTS_PER_TILE) continue;
     const e = { name: lm.name, lat: round6(lm.lat), lng: round6(lm.lng), kind: lm.kind };
     if (lm.ele !== undefined) e.ele = lm.ele;
+    if (anchor) e.anchor = true;
     out.push(e);
   }
   return out;
@@ -809,6 +1029,88 @@ function buildHabitat(i, j) {
   return { cellDeg: CELL_DEG, cx0, cy0, cols: cx1 - cx0 + 1, rows: cy1 - cy0 + 1, cells: s };
 }
 
+// Area of the slice's ownership polygon, in km². Same scanline and the same even-odd rule
+// as `cellsInsideRings` / `pointInRings`, so "inside" here means exactly what it means to
+// `owns()`. A spherical-shoelace formula would instead have to agree with the winding of
+// every Geofabrik .poly, and one `!hole` ring taken the wrong way round would be a silent
+// factor of two in the anchor count. This integrates what the ownership test actually says.
+function sliceAreaKm2() {
+  if (bbox)
+    return (
+      ((bbox.maxLng - bbox.minLng) *
+        mPerDegLng((bbox.minLat + bbox.maxLat) / 2) *
+        (bbox.maxLat - bbox.minLat) *
+        M_PER_DEG) /
+      1e6
+    );
+  if (!ownRings) return null; // unconstrained local test — no count cap (see selectAnchors)
+  let minLat = Infinity, maxLat = -Infinity;
+  for (const r of ownRings)
+    for (const [, y] of r) {
+      if (y < minLat) minLat = y;
+      if (y > maxLat) maxLat = y;
+    }
+  if (!Number.isFinite(minLat)) return 0;
+  let m2 = 0;
+  for (let i = Math.floor(minLat / SLICE_AREA_STEP_DEG); i <= Math.floor(maxLat / SLICE_AREA_STEP_DEG); i++) {
+    const y = (i + 0.5) * SLICE_AREA_STEP_DEG;
+    if (y < minLat || y > maxLat) continue;
+    const xs = [];
+    for (const r of ownRings)
+      for (let a = 0; a < r.length; a++) {
+        const [x1, y1] = r[a];
+        const [x2, y2] = r[(a + 1) % r.length];
+        if (y1 > y !== y2 > y) xs.push(x1 + ((x2 - x1) * (y - y1)) / (y2 - y1));
+      }
+    xs.sort((p, q) => p - q);
+    let dLng = 0;
+    for (let k = 0; k + 1 < xs.length; k += 2) dLng += xs[k + 1] - xs[k];
+    m2 += dLng * mPerDegLng(y) * SLICE_AREA_STEP_DEG * M_PER_DEG;
+  }
+  return m2 / 1e6;
+}
+
+// The slice's anchor set — the few named things significant enough to hold a creature.
+// Three terms, each doing a job the other two cannot (SPEC §10.8):
+//
+//   1. RANK by significance, descending, ties broken by KEY ascending so a re-bake of
+//      unchanged data produces the identical set.
+//   2. SPREAD — at most one per ANCHOR_CELL_DEG cell. This is what turns "the 12 highest
+//      points in Vermont", four of which are named bumps on Mount Mansfield, into "the 12
+//      best places in Vermont".
+//   3. COUNT — round(ANCHOR_DENSITY_PER_KM2 × slice area), at least 1. Area-normalised, so
+//      Vermont gets 12 and California would get ~200; a flat per-slice number gives them
+//      the same and is the thing this cap exists not to be.
+//
+// The floor of 1 and ANCHOR_SIG_MIN pull in opposite directions ON PURPOSE: the floor says
+// every slice gets its best thing, the minimum says only if that thing is significant at
+// all. A slice with nothing above its kinds' references emits an empty sidecar, and that is
+// an answer rather than a failure.
+function selectAnchors() {
+  const areaKm2 = sliceAreaKm2();
+  const limit =
+    areaKm2 === null ? Infinity : Math.max(1, Math.round(ANCHOR_DENSITY_PER_KM2 * areaKm2));
+  const ranked = [...anchorCands.values()]
+    .filter((a) => a.sig >= ANCHOR_SIG_MIN)
+    .sort((a, b) => b.sig - a.sig || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  const takenCells = new Set();
+  const out = [];
+  for (const a of ranked) {
+    if (out.length >= limit) break;
+    const ck = Math.floor(a.lat / ANCHOR_CELL_DEG) + ':' + Math.floor(a.lng / ANCHOR_CELL_DEG);
+    if (takenCells.has(ck)) continue;
+    takenCells.add(ck);
+    out.push(a);
+  }
+  // Sorted by KEY for the sidecar — by identity, not by score, so the file diffs
+  // line-for-line against the previous bake instead of reshuffling when one score moves.
+  out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return { anchors: out, areaKm2, limit, eligible: ranked.length };
+}
+
+const anchorSel = selectAnchors();
+const anchorKeys = new Set(anchorSel.anchors.map((a) => a.key));
+
 mkdirSync(join(OUT, 'v5'), { recursive: true });
 const v5Keys = new Set([...cells.keys(), ...lcByCell.keys(), ...lmByCell.keys()]);
 const hashes5 = {};
@@ -847,24 +1149,118 @@ for (const key of v5Keys) {
 }
 writeFileSync(join(OUT, 'hashes-v5.json'), JSON.stringify(hashes5));
 
-// Habitat sidecar: one line per OWNED non-rural spawn cell (rural is the default,
-// so omitting it keeps the file small). Sorted by cy, then cx — deterministic.
+// ---- Landmark anchor sidecar (SPEC §10.8, docs/LANDMARK-SPAWNS.md Option A) ----------
+// One line per DISTINCT anchor, sorted by key. Not one per tile LISTING: proximity and
+// containment binning list the same feature from every tile it touches, so the District's
+// 341 "parks" were 121 places and its 1,183 listings were 242 anchors. The dedupe happens
+// HERE, where the whole slice is in scope, and never client-side, where the set is already
+// truncated to six per tile.
+//
+// `key` is emitted, not left to the ingester to recompute. It is the identity of the row;
+// it should be produced once, by the thing that owns the coordinate.
+//
+// `name` is here and is NOT in the server's table sketch, deliberately. The sidecar is the
+// only artifact outside the tiles that holds the key→name mapping, and an operator reading
+// `peak@44544...` needs to be able to tell it is Mount Mansfield without re-baking a state.
+writeFileSync(
+  join(OUT, `landmarks-${SLICE}.jsonl`),
+  anchorSel.anchors
+    .map((a) =>
+      JSON.stringify(
+        a.ele === undefined
+          ? { key: a.key, kind: a.kind, lat: a.lat, lng: a.lng, name: a.name }
+          : { key: a.key, kind: a.kind, lat: a.lat, lng: a.lng, ele: a.ele, name: a.name },
+      ),
+    )
+    .join('\n') + (anchorSel.anchors.length ? '\n' : ''),
+);
+
+// ---- Slice-owned spawn cells -> the habitat sidecar AND the habitat atlas ------------
+// One pass, one ownership rule. §4's exactly-one-writer rule applies here at spawn-cell
+// granularity: a cell counts for this slice iff its CENTRE is inside the slice poly. Both
+// artifacts must use it, and neither may be derived from the per-tile habitat grids, which
+// include cells classified from the buffer geometry a Geofabrik extract carries from its
+// neighbours — reading DC off the grids said 38% rural, which is not a fact about DC.
 const sidecar = [];
+const atlas = new Map(); // `${bx}:${by}` -> class-occurrence mask (ATLAS_BIT)
 for (const k of hab.keys()) {
   const [cx, cy] = k.split(':').map(Number);
-  const cls = classifyHabitat(cx, cy);
-  if (cls === 'rural') continue;
   if (!ownsLatLng((cy + 0.5) * CELL_DEG, (cx + 0.5) * CELL_DEG)) continue;
+  const cls = classifyHabitat(cx, cy);
+  // The ATLAS records rural; the sidecar (below) omits it. Not an inconsistency — the two
+  // pay for it differently. The sidecar is one LINE per cell and rural is the default, so
+  // listing it would multiply a 5 MB file by ten to say "nothing here". The atlas is a
+  // fixed-size raster where rural costs one BIT that is already allocated, and without it
+  // the atlas could not answer "where is rural" at all — which in Vermont is 90% of the
+  // state and the single most likely habitat a player is standing in.
+  const ak = Math.floor(cx / ATLAS_BLOCK_CELLS) + ':' + Math.floor(cy / ATLAS_BLOCK_CELLS);
+  atlas.set(ak, (atlas.get(ak) ?? 0) | ATLAS_BIT[cls]);
+  if (cls === 'rural') continue;
   sidecar.push({ cx, cy, cls });
 }
+
+// Habitat sidecar: one line per OWNED non-rural spawn cell (rural is the default,
+// so omitting it keeps the file small). Sorted by cy, then cx — deterministic.
 sidecar.sort((a, b) => a.cy - b.cy || a.cx - b.cx);
 writeFileSync(
   join(OUT, `habitat-${SLICE}.jsonl`),
   sidecar.map((s) => JSON.stringify({ cx: s.cx, cy: s.cy, class: s.cls })).join('\n') + (sidecar.length ? '\n' : ''),
 );
+
+// Habitat atlas: a DENSE raster over the slice's block bounding box, row-major
+// south→north (by ascending outer) and west→east within a row — the same order as the
+// per-tile habitat grid of §10.3, one zoom out, so there is no second convention to learn.
+//
+// Dense rather than a sparse {blockKey: mask} map for two reasons. Size: a JSON object
+// entry costs ~20 B against 1 B for a raster slot, and a state's block bbox is well over
+// 5% occupied (Vermont, a diagonal wedge, is 346/504 = 69%), so sparse loses by an order.
+// And shape: the query this exists to answer is "walk outward from my block until one has
+// bit X", which over a raster is index arithmetic with no allocation and no hashing.
+//
+// A block with mask 0 means NO DATA — this slice owns no classified spawn cell there. It
+// does NOT mean "empty land": the block may be ocean, or it may belong to the next state
+// and be densely urban. The distinction is the whole abstention contract; a consumer that
+// reads 0 as "rural" would fabricate a wilderness out of a state line.
+let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+for (const k of atlas.keys()) {
+  const [bx, by] = k.split(':').map(Number);
+  if (bx < bx0) bx0 = bx;
+  if (bx > bx1) bx1 = bx;
+  if (by < by0) by0 = by;
+  if (by > by1) by1 = by;
+}
+const hasBlocks = atlas.size > 0;
+const aCols = hasBlocks ? bx1 - bx0 + 1 : 0;
+const aRows = hasBlocks ? by1 - by0 + 1 : 0;
+let blocks = '';
+for (let by = by0; by <= by1; by++)
+  for (let bx = bx0; bx <= bx1; bx++) blocks += ATLAS_B64[atlas.get(bx + ':' + by) ?? 0];
+writeFileSync(
+  join(OUT, `atlas-${SLICE}.json`),
+  JSON.stringify({
+    v: 1,
+    slice: SLICE,
+    cellDeg: CELL_DEG,
+    blockCells: ATLAS_BLOCK_CELLS,
+    bx0: hasBlocks ? bx0 : 0,
+    by0: hasBlocks ? by0 : 0,
+    cols: aCols,
+    rows: aRows,
+    classes: Object.keys(ATLAS_BIT), // index i is bit (1 << i) — bit order is key order
+    blocks,
+  }) + '\n',
+);
+
 console.error(
   `[tile] v5: ${written5} tiles, ${lcPolys.length} landcover polys, ` +
-    `${sidecar.length} non-rural habitat cells -> ${OUT}/v5, ${OUT}/habitat-${SLICE}.jsonl`,
+    `${sidecar.length} non-rural habitat cells -> ${OUT}/v5, ${OUT}/habitat-${SLICE}.jsonl; ` +
+    `atlas ${atlas.size} blocks in a ${aCols}x${aRows} raster -> ${OUT}/atlas-${SLICE}.json`,
+);
+console.error(
+  `[tile] anchors: ${anchorSel.anchors.length} of ${anchorSel.eligible} eligible ` +
+    `(${anchorCands.size} owned candidates), cap ${anchorSel.limit} from ` +
+    `${anchorSel.areaKm2 === null ? 'unconstrained' : Math.round(anchorSel.areaKm2) + ' km2'} ` +
+    `-> ${OUT}/landmarks-${SLICE}.jsonl`,
 );
 
 // ---- Geofabrik .poly parser + even-odd point test ----

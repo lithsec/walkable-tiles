@@ -45,7 +45,7 @@ const cellOf = (lat, lng) => [Math.floor(lat / TILE_DEG), Math.floor(lng / TILE_
 // A probe may carry a 7th element, `want` — a VALUE assertion about the v5 terrain layers
 // of that cell (ignored for v4, which has none). This is how a new tile field gets a
 // checker BEFORE it exists: the probe is added red and goes green when the bake lands.
-//   want.landmark  { kind | kindIn, nameIncludes, eleMin, eleMax }
+//   want.landmark  { kind | kindIn, nameIncludes, eleMin, eleMax, anchor }
 //                  at least one landmark must match every field given.
 //   want.attrWays  at least this many ways must carry `lit` or `access` (SPEC §10.6).
 //   want.habitatHas / want.habitatLacks
@@ -125,6 +125,16 @@ const PROBES = [
   // distinguishes the summit node from the protected area around it.
   ['utah', 'Mount Timpanogos summit carries name + ele', 40.3907, -111.6457, 'any', ['v5'],
     { landmark: { kind: 'peak', nameIncludes: 'Timpanogos', eleMin: 3000, eleMax: 4000 } }],
+
+  // An ANCHOR, flagged in its own tile (SPEC §10.8). This is the only probe that checks the
+  // regional cap from the outside, and Mount Timpanogos is the right subject twice over: at
+  // 3,581 m it is far and away the most significant thing in its 0.5° cell, and Utah's
+  // 219,882 km² earns ~105 anchors, so it is nowhere near the count cap's edge. The claim
+  // being made is narrow and worth stating: the anchor is present in the tile that CONTAINS
+  // it. An anchor truncated out of its own tile is an anchor no client can ever spawn at,
+  // and that is exactly the failure anchors-sort-first exists to prevent.
+  ['utah', 'Mount Timpanogos is an anchor in its own tile', 40.3907, -111.6457, 'any', ['v5'],
+    { landmark: { kind: 'peak', nameIncludes: 'Timpanogos', anchor: true } }],
 
   // National parks, probed from DEEP INSIDE rather than near the centroid — that is the
   // half of §10.2 that containment binning adds. Both parks are already in today's filter
@@ -215,18 +225,26 @@ function landmarkMiss(landmarks, w) {
       (!kinds || kinds.includes(lm.kind)) &&
       (!w.nameIncludes || (typeof lm.name === 'string' && lm.name.includes(w.nameIncludes))) &&
       (w.eleMin === undefined || (typeof lm.ele === 'number' && lm.ele >= w.eleMin)) &&
-      (w.eleMax === undefined || (typeof lm.ele === 'number' && lm.ele <= w.eleMax)),
+      (w.eleMax === undefined || (typeof lm.ele === 'number' && lm.ele <= w.eleMax)) &&
+      // `anchor` is written only when true (SPEC §10.2), so `anchor: true` asserts the
+      // flag is present. There is no `anchor: false` assertion and there should not be:
+      // absent means "this slice did not rank it", which a tile near a slice border says
+      // about a landmark the neighbouring slice does anchor.
+      (w.anchor === undefined || lm.anchor === true),
   );
   if (hit) return null;
   const want = [
     kinds ? `kind ${kinds.join('|')}` : null,
     w.nameIncludes ? `name ~ "${w.nameIncludes}"` : null,
     w.eleMin !== undefined || w.eleMax !== undefined ? `ele ${w.eleMin ?? '-'}..${w.eleMax ?? '-'}` : null,
+    w.anchor ? 'anchor' : null,
   ]
     .filter(Boolean)
     .join(', ');
   const got = landmarks.length
-    ? landmarks.map((lm) => `${lm.kind}:${lm.name}${lm.ele !== undefined ? `@${lm.ele}` : ''}`).join(' / ')
+    ? landmarks
+        .map((lm) => `${lm.kind}:${lm.name}${lm.ele !== undefined ? `@${lm.ele}` : ''}${lm.anchor ? '*' : ''}`)
+        .join(' / ')
     : '(none)';
   return `no landmark matching {${want}} — tile has ${got}`;
 }

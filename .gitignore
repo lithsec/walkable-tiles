@@ -11,4 +11,7 @@ states-bake.log
 bake-*.log
 .bake-state/
 out-trial/
+# bake-states.sh --trial <slice> writes out-trial-<slice>, not out-trial. Tens of MB, and
+# untracked it is one `git add -A` away from being committed.
+out-trial-*/
 out/
