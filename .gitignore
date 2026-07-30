@@ -10,3 +10,5 @@ out/
 states-bake.log
 bake-*.log
 .bake-state/
+out-trial/
+out/
