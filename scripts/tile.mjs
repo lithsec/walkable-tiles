@@ -31,6 +31,7 @@ import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
+import { Dem, buildReliefGrid } from './dem.mjs';
 
 const TILE_DEG = 0.01;
 const BOX_HALF_M = 1200;
@@ -163,21 +164,50 @@ const LANDMARK_SIG_REF_M2 = {
   // measured rather than guessed.
   library: 1e4,
 };
-// A summit's significance comes from `ele`, and the bridge to an area is dimensional: at a
-// fixed hillside slope a summit of height h has a footprint ∝ h², so log2 of that footprint
-// is 2·log2(h) and the slope cancels out of the ranking entirely. Only the reference height
-// survives, and 105 m is where a named summit becomes a locally notable high point — the
-// District's 17 named summits run 28–123 m, so its own best hills score around zero, which
-// is exactly what a reference is supposed to mean.
+// A summit's significance comes from its LOCAL RELIEF, and the bridge to an area is
+// dimensional: at a fixed hillside slope a summit standing h metres above its own ground
+// has a footprint ∝ h², so log2 of that footprint is 2·log2(h) and the slope cancels out of
+// the ranking entirely. Only a reference height survives.
 //
-// THE LIMITATION, STATED: `ele` is height above SEA LEVEL, not prominence, and this bake
-// has no elevation source to subtract a base from — the same gap that leaves the `m`
-// habitat character reserved and unemitted (SPEC §10.3). Comparisons are only ever made
-// WITHIN one ANCHOR_CELL_DEG cell, where the valley floor is near enough constant for this
-// to hold; across a continent it is not, and a 1,700 m bump on the Colorado plateau will
-// out-score a city park it has no business out-scoring. When Copernicus relief lands, this
-// is the line that changes.
-const PEAK_ELE_REF_M = 105;
+// THIS IS THE LINE THAT COPERNICUS RELIEF CHANGED (2026-07-30). It used to read `ele`,
+// which is height above SEA LEVEL, so a 1,700 m bump on the Colorado plateau out-scored
+// every city park in the country and the previous revision could only warn about it.
+// The magnitude is now the summit's DROP into the ground within PEAK_RELIEF_R_M of it — a
+// fact about the ground the summit stands on, comparable across a continent.
+//
+// THE MAGNITUDE IS THE DROP, `elev(summit) − min(window)`, and NOT the window's range.
+// That was measured the hard way: ranking Vermont by `max − min` over a 1 km disc handed
+// the state's twelve anchors to Table Rock, The Cobble (265 m) and Bear Mount and left out
+// Mount Mansfield, Killington Peak and Camels Hump — because a knob beside a mountain has
+// the mountain inside its window. Range detects cliffs; drop measures the summit.
+//
+// R = 2000 m, and it is the massif's shoulder that sets it. The window has to be wider than
+// the ridge a summit sits on or it ranks the ridge instead. Measured on Vermont's own
+// sub-summits, drop in metres:
+//
+//                       R = 1000   R = 1500   R = 2000
+//   Mount Mansfield         546        729        837
+//   Adams Apple             597        734        766     (a knob 1 km along the ridge)
+//   Bear Head               597        663        691
+//   Killington Peak         381        471        538
+//   Little Killington       344        430        485
+//
+// At 1 km Mansfield loses its own anchor cell twice over; at 1.5 km it loses to Adams Apple
+// by five metres; at 2 km it leads Vermont outright and every named sub-summit of Mansfield,
+// Killington and Equinox falls behind its parent. Going wider is not free — at 3 km Mt
+// Ascutney falls behind Ascutney North, because the window stops being local at all.
+//
+// REF = 60 m, the same construction the retired `ele`/105 m reference used, on a quantity
+// that means something. The District's 17 named summits run 38–103 m of drop over a 2 km
+// disc with a MEDIAN of 60, so its own hills score around zero. Below that is the surface
+// model's own noise: Vermont's flattest named "hills" — Stanhope Hill, The Hurricane,
+// Upper Diggings — measure 24–36 m, which is a name attached to a road bend. Point Reno,
+// which is genuinely the District's high point, measures 84 m and scores +0.97 where `ele`
+// gave it +0.46. And the scale is preserved (Mansfield 7.6 against 7.4; Vermont's median
+// summit 4.2 against ~4.5), so the AREA references below — read off the same trial
+// distributions and balanced against the old peak scores — still hold.
+const PEAK_RELIEF_R_M = 2000;
+const PEAK_RELIEF_REF_M = 60;
 // `boundary=national_park` is an ADMINISTRATIVE tag, not a claim about scale, and in the US
 // the National Park Service puts it on everything it operates. Measured in the District:
 // all 37 features the old rule promoted carry it, and they are Dupont Circle (9,000 m²),
@@ -234,11 +264,45 @@ const HAB = {
 // The client does not map `g` to either successor either; it decodes to nothing and the
 // cell falls back to rural. Legacy cells go quiet rather than wrong.
 //
-// `m` (mountain) is reserved by the client's vocabulary and is NOT emitted here: the
-// mountain classifier needs an elevation source this bake does not have (Copernicus
-// GLO-30, regional relief). Reserving the character now is free; the named peaks with
-// `ele` that revision 2 adds are that classifier's calibration set.
-const HAB_CODE = { urban: 'u', residential: 'r', woodland: 'w', greenspace: 's', rural: '.' };
+// `m` (mountain) is emitted as of 2026-07-30, from Copernicus GLO-30 regional relief
+// (dem.mjs, SPEC §10.4/§10.9). It was reserved and unemitted for one revision, and the
+// reservation cost nothing — which is the argument for reserving a character the day the
+// vocabulary declares it rather than the day the data arrives.
+const HAB_CODE = { urban: 'u', residential: 'r', woodland: 'w', greenspace: 's', mountain: 'm', rural: '.' };
+
+// ---- mountain: regional relief, not slope and not altitude (SPEC §10.4) ---------------
+//
+// THE DEFINITION, AND THE THREE CASES THAT RULE OUT THE OBVIOUS ANSWERS. A city IN the
+// mountains counts; a big hill inside a city does not; the Rockies count. Absolute
+// elevation fails the first pair — a Swedish fjäll town sits lower than flat Denver at
+// 1,600 m. Slope fails all three — a city hill is the steepest thing for miles and a
+// Rockies valley floor is flat. What separates them is the RADIUS at which relief is
+// measured: a city hill has high relief within 1 km and low within 5, and a mountain town
+// is the reverse. So: elevation range over a 5 km disc, and a mountain VALLEY FLOOR is
+// mountain, because the mountains are inside the window even though the ground underfoot
+// is flat. That is the right answer for a game played on foot — you are IN the mountains.
+//
+// R = 5000 m. Measured on Vermont, 2026-07-30, the separation is widest here: at 4 km
+// Stowe (a mountain village) scores 466 m and Island Pond (rolling Northeast Kingdom
+// hills) scores 403 — no gap. At 6 km Montpelier climbs to 345 and erodes it from the
+// other side. At 5 km the Champlain and Connecticut valley towns run 111–458 m and the
+// mountain towns run 568–1074, and nothing lands in between.
+//
+// THRESHOLD = 500 m, which is the top of the 400–500 m band the scoping doc proposed, and
+// it is set by that gap rather than by the band: 450 admits Island Pond at 458. Checked
+// worldwide against the owner's own cases, disc radius 5 km:
+//
+//   Denver 88   Stockholm 90   Boston Common 70   Amsterdam 50   Phoenix 57   Miami 26
+//   Sheffield 246 (the steepest city in England)   Colorado Springs 223   Kiruna 338
+//   —— threshold 500 ——
+//   SLC downtown 528   Leadville 726   Estes Park 780 (a Rockies VALLEY FLOOR)
+//   Keswick 787   Boulder 868   Björkliden 956   Åre 1044 (the fjäll town)
+//   Alta 1234   Provo 1371   Zermatt 2132   Chamonix 2603
+//
+// Flagstaff (270) and Kathmandu (455) fall below and are the honest cost: both sit on a
+// plateau or a valley floor whose mountains are 10–15 km out, which is further than a walk.
+const MOUNTAIN_RELIEF_R_M = 5000;
+const MOUNTAIN_RELIEF_MIN_M = 500;
 
 // ---- habitat atlas (SPEC §10.7) — which classes OCCUR in each coarse block ----------
 // A block is ATLAS_BLOCK_CELLS × ATLAS_BLOCK_CELLS spawn cells:
@@ -443,13 +507,16 @@ function landmarkKind(pr, areaM2) {
 // How significant a landmark is, in doublings above its kind's locally-notable reference
 // (LANDMARK_SIG_REF_M2). `null` means the kind cannot anchor a creature at all.
 //
-// -Infinity is a real answer and not a bug: a peak with no `ele` and an area kind whose
-// parts all fell under LC_MIN_AREA_M2 have no magnitude to measure, so they sort below
-// everything that does and below ANCHOR_SIG_MIN. An unmeasured thing is not a small thing,
-// but it is not evidence of a large one either, and this cap is spending scarce slots.
-function landmarkSig(kind, areaM2, ele) {
-  if (kind === 'peak')
-    return typeof ele === 'number' ? 2 * Math.log2(Math.max(ele, 1) / PEAK_ELE_REF_M) : -Infinity;
+// -Infinity is a real answer and not a bug: a peak the DEM does not cover, and an area kind
+// whose parts all fell under LC_MIN_AREA_M2, have no magnitude to measure, so they sort
+// below everything that does and below ANCHOR_SIG_MIN. An unmeasured thing is not a small
+// thing, but it is not evidence of a large one either, and this cap is spending scarce
+// slots.
+function landmarkSig(kind, areaM2, reliefM) {
+  // NaN reaches here from a peak the DEM does not cover (SPEC §10.4's abstention: ocean,
+  // above the archive's northern limit) and falls through to -Infinity with everything
+  // else unmeasurable. `NaN > 0` is false, which is the whole guard.
+  if (kind === 'peak') return reliefM > 0 ? 2 * Math.log2(reliefM / PEAK_RELIEF_REF_M) : -Infinity;
   const ref = LANDMARK_SIG_REF_M2[kind];
   if (ref == null) return null;
   return areaM2 > 0 ? Math.log2(areaM2 / ref) : -Infinity;
@@ -568,7 +635,11 @@ function addLandmark(name, lat, lng, kind, area, ele, radiusM, coverRings) {
   // ranking, not after, so the anchor set is a function of this slice's extract alone and
   // reproduces from it; ranking first and filtering after would make the result depend on
   // how much of the neighbouring state a Geofabrik extract's buffer happened to include.
-  const sig = landmarkSig(kind, area, ele);
+  // A peak's magnitude is its LOCAL RELIEF, and the DEM has not been read yet — that pass
+  // runs once, after the whole extract, because it is bounded by the slice's own candidate
+  // set rather than by the stream. Peaks enter at -Infinity and are re-scored there; two
+  // peaks rounding to the same micro-degree point are the same point, so the first wins.
+  const sig = kind === 'peak' ? -Infinity : landmarkSig(kind, area);
   if (sig !== null && ownsLatLng(lat, lng)) {
     const prev = anchorCands.get(key);
     if (!prev || sig > prev.sig)
@@ -1001,15 +1072,30 @@ function greenKind(st) {
   return w > 0 && w >= bits(st.gmask) ? 'woodland' : 'greenspace';
 }
 
-// Habitat class of one spawn cell — v2 rules, IN ORDER (normative — SPEC.md §10.4).
+// Habitat class of one spawn cell — v3 rules, IN ORDER (normative — SPEC.md §10.4).
 function classifyHabitat(cx, cy) {
   const st = hab.get(cx + ':' + cy);
   if (!st) return 'rural';
-  // The GATE is the union of the two masks — bit-identical to revision 1's single mask,
-  // so exactly the same cells enter the green family as before.
+  const all = st.foot + st.res + st.road;
+  // 0. MOUNTAIN, and it claims first because regional relief is the coarsest and most
+  //    stable fact about a cell: a wooded mountainside is a mountain, and a lake in a
+  //    corrie is a mountain. The finer classes describe what is ON the ground; this one
+  //    describes the ground.
+  //
+  //    `all > 0` is the same guard the green rule's `foot > 0` is, at the strength this
+  //    class needs. Spawns snap to walkable ways, so a cell with no walkable way of any
+  //    kind places nothing and classifying it would put a creature where nobody can
+  //    stand — the lesson from ~40% of Massachusetts' green cells being trackless forest.
+  //    It is `all` and not `foot` because a mountain town has streets and a creature that
+  //    lives there is welcome to them; that IS the "a city in the mountains counts" case.
+  //
+  //    A NaN relief — no DEM coverage, or no elevation pass at all — is false against
+  //    `>=`, so the cell falls through to the rules below. Abstention, not a guess.
+  if (all > 0 && reliefGrid !== null && reliefGrid.at(cx, cy) >= MOUNTAIN_RELIEF_MIN_M) return 'mountain';
+  // The green GATE is the union of the two masks — bit-identical to revision 1's single
+  // mask, so exactly the same cells enter the green family as before.
   const coverFrac = bits(st.wmask | st.gmask) / 4;
   if (coverFrac >= HAB.GREEN_COVER_MIN && st.foot > 0) return greenKind(st);
-  const all = st.foot + st.res + st.road;
   if (all >= HAB.URBAN_LEN_MIN && st.res / all <= HAB.URBAN_RES_SHARE_MAX) return 'urban';
   if (st.foot >= HAB.PATH_LEN_MIN && st.foot / all >= HAB.PATH_SHARE_MIN) return greenKind(st);
   if (st.res >= HAB.RES_LEN_MIN && st.res / all >= HAB.RES_SHARE_MIN) return 'residential';
@@ -1106,6 +1192,70 @@ function selectAnchors() {
   // line-for-line against the previous bake instead of reshuffling when one score moves.
   out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   return { anchors: out, areaKm2, limit, eligible: ranked.length };
+}
+
+// ---- the elevation pass (SPEC §10.4, §10.8, §10.9) -----------------------------------
+//
+// One pass, after the whole extract and before anything is ranked or written, because both
+// consumers need the DEM and both are bounded by sets this slice already knows: the spawn
+// cells that have data, and the named peaks it owns. Doing it inside the read loop would
+// mean an await per feature against a remote archive.
+//
+// DEM_DISABLE=1 exists for a network-free run and prints a banner rather than degrading
+// quietly, because "no mountain anywhere" and "no mountains here" are the same output and
+// only one of them is true.
+const DEM_OFF = process.env.DEM_DISABLE === '1';
+let reliefGrid = null; // read by classifyHabitat; null means "no elevation, abstain"
+if (DEM_OFF) {
+  console.error('[tile] !! DEM_DISABLE=1 — no elevation source for this bake.');
+  console.error('[tile] !! No cell can classify `mountain`, and no named peak can rank as');
+  console.error('[tile] !! an anchor. Both are ABSENCES, and neither is visible in the output.');
+} else if (hab.size === 0) {
+  console.error('[tile] no spawn cell carries data — elevation pass skipped');
+} else {
+  const dem = new Dem({});
+  let cxLo = Infinity, cxHi = -Infinity, cyLo = Infinity, cyHi = -Infinity;
+  for (const k of hab.keys()) {
+    const c = k.indexOf(':');
+    const cx = Number(k.slice(0, c)), cy = Number(k.slice(c + 1));
+    if (cx < cxLo) cxLo = cx;
+    if (cx > cxHi) cxHi = cx;
+    if (cy < cyLo) cyLo = cy;
+    if (cy > cyHi) cyHi = cy;
+  }
+  const t0 = Date.now();
+  let lastPct = -1;
+  reliefGrid = await buildReliefGrid(dem, {
+    cxLo, cxHi, cyLo, cyHi,
+    cellDeg: CELL_DEG,
+    mPerDeg: M_PER_DEG,
+    radiusM: MOUNTAIN_RELIEF_R_M,
+    onBand: (done, total) => {
+      const pct = Math.floor((10 * done) / total) * 10;
+      if (pct > lastPct) { lastPct = pct; console.error(`[tile] dem: sampled ${pct}%`); }
+    },
+  });
+  console.error(
+    `[tile] relief: ${reliefGrid.cols}x${reliefGrid.rows} cells, disc r=${MOUNTAIN_RELIEF_R_M} m ` +
+      `(${reliefGrid.ry} rows x ${reliefGrid.rx[0]} cols at the widest), ` +
+      `${((Date.now() - t0) / 1000).toFixed(1)}s`,
+  );
+  // Peaks, sorted south-to-north so consecutive lookups share COG blocks — the same
+  // locality the band loop above relies on, applied to a scattered set.
+  const peaks = [...anchorCands.values()]
+    .filter((a) => a.kind === 'peak')
+    .sort((a, b) => a.lat - b.lat || a.lng - b.lng);
+  for (const a of peaks) {
+    a.relief = await dem.dropAtPoint(a.lat, a.lng, PEAK_RELIEF_R_M, M_PER_DEG);
+    a.sig = landmarkSig('peak', 0, a.relief);
+  }
+  const scored = peaks.filter((a) => Number.isFinite(a.sig));
+  console.error(
+    `[tile] peaks: ${scored.length} of ${peaks.length} owned summits scored from local ` +
+      `drop (r=${PEAK_RELIEF_R_M} m, ref ${PEAK_RELIEF_REF_M} m); ` +
+      `${peaks.length - scored.length} abstained (no DEM coverage)`,
+  );
+  console.error(`[tile] dem: ${dem.summary()}`);
 }
 
 const anchorSel = selectAnchors();

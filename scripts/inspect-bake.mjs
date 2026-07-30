@@ -35,6 +35,10 @@ function* tiles(dir) {
 }
 
 const HABITAT_NAME = { u: 'urban', r: 'residential', w: 'woodland', s: 'greenspace', m: 'mountain', '.': 'rural' };
+// Named summits, for the peak-prominence report below. `ele` is what the tile SHIPS (the
+// OSM tag); the score that ranks it is local drop from the DEM (SPEC §10.8), and the two
+// disagreeing is the entire point of revision 3 — so both are printed side by side.
+const peakEles = [];
 
 const habitat = new Map();
 const landmarkKinds = new Map();
@@ -69,6 +73,7 @@ for (const f of tiles(v5)) {
   }
   for (const lm of d.landmarks ?? []) {
     landmarkKinds.set(lm.kind, (landmarkKinds.get(lm.kind) ?? 0) + 1);
+    if (lm.kind === 'peak' && typeof lm.ele === 'number') peakEles.push(lm.ele);
     if (lm.ele !== undefined && lm.ele !== null) withEle++;
     const ak = `${lm.kind}@${Math.round(lm.lat * 1e6)},${Math.round(lm.lng * 1e6)}`;
     if (!landmarkAnchors.has(ak)) landmarkAnchors.set(ak, lm);
@@ -137,6 +142,17 @@ console.log(
     `${String(landmarkAnchors.size).padStart(10)}`,
 );
 console.log(`  ${String('with ele').padEnd(14)} ${String(withEle).padStart(8)}   (peaks carry elevation)`);
+// The `ele` SPREAD is what makes the prominence filter necessary rather than nice: the
+// District's named summits are 28-123 m and Vermont's are 51-1,340 m, so the two OVERLAP
+// and no absolute elevation threshold can separate a city hill from a mountain. The anchor
+// list below is where to see what replaced it.
+if (peakEles.length) {
+  const sorted = [...new Set(peakEles)].sort((a, b) => a - b);
+  console.log(
+    `  ${String('ele range').padEnd(14)} ${String(sorted[0] + '-' + sorted[sorted.length - 1] + ' m').padStart(8)}` +
+      `   median ${sorted[Math.floor(sorted.length / 2)]} m over ${sorted.length} distinct values`,
+  );
+}
 if (distinctByKind.get('national_park'))
   console.log(
     `\n  national_park is non-zero — check the NAMES below. NPS administrative units\n` +
@@ -298,7 +314,12 @@ function reportAtlas() {
         const m = mask(bx, by);
         const e = fromSidecar.get(bx + ':' + by);
         a.classes.forEach((c, bit) => {
-          if (c === 'rural' || c === 'mountain') return;
+          // `rural` is the one class the sidecar omits by design (SPEC §10.7), so the
+          // atlas legitimately carries a bit nothing here can back. Everything else must
+          // be backed — INCLUDING `mountain`, which was skipped while the bit could only
+          // ever be 0. Leaving it skipped once revision 3 started setting it would have
+          // made the one new bit the only unverified one in the artifact.
+          if (c === 'rural') return;
           if (m & (1 << bit) && !(e && e.get(c))) extra++;
         });
       }

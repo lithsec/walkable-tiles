@@ -151,7 +151,8 @@ const PROBES = [
   // a coverage percentage. OSM `lit` coverage in the US is genuinely thin, so a percentage
   // floor would be this verifier asserting a lie about the data rather than about the bake.
   ['massachusetts', 'Boston ways carry lit/access', 42.3601, -71.0589, 'dense', ['v5'], { attrWays: 1 }],
-  ['florida', 'Miami ways carry lit/access', 25.7617, -80.1918, 'dense', ['v5'], { attrWays: 1 }],
+  ['florida', 'Miami ways carry lit/access', 25.7617, -80.1918, 'dense', ['v5'],
+    { attrWays: 1, habitatLacks: 'm' }],
   ['utah', 'Salt Lake City ways carry lit/access', 40.7608, -111.891, 'dense', ['v5'], { attrWays: 1 }],
 
   // The habitat split (SPEC §10.3/§10.4): `g` retired, `w` woodland, `s` greenspace.
@@ -168,6 +169,24 @@ const PROBES = [
     { habitatHas: 's', habitatLacks: 'g' }],
   ['utah', 'Liberty Park reads as greenspace', 40.746, -111.876, 'any', ['v5'],
     { habitatHas: 's', habitatLacks: 'g' }],
+
+  // `mountain` (SPEC §10.4, revision 3). RED until the slices are re-baked, which is what
+  // makes it a check rather than decoration — the same way the revision-2 probes above were
+  // written red and went green when that bake landed.
+  //
+  // Provo, not a summit, and that is the point: it is a dense CITY whose regional relief
+  // measures 1,371 m over a 5 km disc because Mount Timpanogos is four kilometres away. It
+  // is the owner's "a city IN the mountains counts" case, asserted on the one live slice
+  // that has real mountains. Salt Lake City would be the tempting choice and is a bad probe
+  // — downtown measures 528 m against a 500 m threshold, so it asserts the calibration
+  // rather than the pipeline.
+  ['utah', 'Provo reads as mountain', 40.2338, -111.6585, 'dense', ['v5'], { habitatHas: 'm' }],
+  // The other direction, and it is the assertion DC's trial bake exists to make: a flat
+  // city must produce NO mountain cell. Miami's relief is 26 m over the same disc. A rule
+  // that over-claims is worse than one that under-claims, because the class is invisible
+  // from inside the app and a wrong `m` reads as a working feature.
+  ['massachusetts', 'Boston is not mountain', 42.3601, -71.0589, 'dense', ['v5'],
+    { habitatLacks: 'm' }],
 ];
 
 const FLOORS = { ways: 200, named: 20, crossings: 50, ptsInCell: 100 };
@@ -283,7 +302,8 @@ function judge(expect, ver, r, want) {
       if (!r.habitatCells.includes(ch)) bad.push(`habitat grid has no '${ch}' cell — grid is ${tally()}`);
     }
     for (const ch of want.habitatLacks ?? '') {
-      if (r.habitatCells.includes(ch)) bad.push(`habitat grid still contains retired '${ch}' — grid is ${tally()}`);
+      if (r.habitatCells.includes(ch))
+        bad.push(`habitat grid contains '${ch}', which this cell must not have — grid is ${tally()}`);
     }
   }
   if (expect === 'any') return bad;

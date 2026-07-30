@@ -135,13 +135,20 @@ the changed ones, because an absent manifest reads as an empty one.
    1200 m of any of its points (dedupe per `(cell, wayId)`); bin crossings by cell.
    A cell is **owned** by the slice iff its center falls inside the slice polygon
    (see boundary rule in `SPEC.md`) — so exactly one slice writes each cell.
-4. **Assemble** each owned cell's v4 payload → gzip.
-5. **Diff-gated upload:** hash each tile, compare to `v4/hashes/<slice>.json`;
+4. **Elevation** (v5 only): fetch the Copernicus GLO-30 blocks the slice's spawn
+   cells fall on, by HTTP range from AWS Open Data — no credentials — and derive
+   regional relief for `mountain` and local drop for the peak ranking
+   (`SPEC.md` §10.4, §10.8, §10.9). Cached under `DEM_CACHE_DIR` between bakes;
+   cold cost measured at 11.7 MB for the District and 255.2 MB for Vermont.
+5. **Assemble** each owned cell's v4 payload → gzip.
+6. **Diff-gated upload:** hash each tile, compare to `v4/hashes/<slice>.json`;
    PUT only changed tiles (minimizes R2 Class-A writes), then refresh the hash
    manifest and the per-slice `build/<slice>.json` stamp.
 
 The osmium steps stream (low memory); tiles flush per-cell, so any Geofabrik
-country/state extract fits a free runner's disk.
+country/state extract fits a free runner's disk. Step 4 is the one pass that
+holds a whole slice in memory at once — one float per spawn cell over the
+slice's bounding box, ~10 MB for Vermont and ~0.5 GB for California.
 
 ---
 
@@ -154,6 +161,8 @@ scripts/gen-slices.mjs       # generate a whole-world slice list from Geofabrik'
 scripts/bake-all.sh          # one-time local seed: bake every slice → R2 (resumable)
 scripts/bake-slice.sh        # download → filter → tile → diff → upload
 scripts/tile.mjs             # OSM features → v4 tiles + gzip
+scripts/dem.mjs              # Copernicus GLO-30 reader (COG over HTTP range, no deps)
+scripts/inspect-bake.mjs     # look at what a LOCAL bake produced, before paying for it
 scripts/serve-local.mjs      # serve baked tiles locally like the CDN (dev only)
 scripts/verify-coverage.mjs  # prove published coverage by value through the CDN
 LICENSE  NOTICE  DATA-LICENSE.md

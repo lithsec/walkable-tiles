@@ -17,6 +17,17 @@
 #                                writes, and does not disturb Cologra's format. See the note
 #                                at the upload call.
 #   R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET   (required unless dry run)
+#   DEM_CACHE_DIR=<dir>          where Copernicus GLO-30 blocks are cached between bakes
+#                                (default ~/.cache/walkable-tiles/dem). It MUST NOT live
+#                                under $WORK — that directory is deleted on exit, and a
+#                                calibration loop would then re-download hundreds of MB per
+#                                run. Cold-cache cost, measured: district-of-columbia
+#                                11.7 MB, vermont 255.2 MB (SPEC §10.9).
+#   DEM_DISABLE=1                bake with NO elevation source. No cell classifies
+#                                `mountain` and no named peak can rank as an anchor. Both
+#                                are absences and neither is visible in the output, so the
+#                                tiler prints a banner; use it for a network-free run and
+#                                never for a bake you intend to publish.
 set -euo pipefail
 
 URL="${1:?usage: bake-slice.sh <pbf-url> <slice-name>}"
@@ -94,6 +105,12 @@ osmium tags-filter --overwrite -o "$FILTERED" "$PBF" \
   n/natural=peak \
   a/boundary=national_park,protected_area
 
+# ── THE TILER NOW REACHES THE NETWORK, and it is not the Geofabrik download ───────────
+# `mountain` (SPEC §10.4) and the peak-prominence score (§10.8) both read Copernicus GLO-30
+# elevation, fetched by HTTP range from AWS Open Data with no credentials (§10.9). It is
+# cached under DEM_CACHE_DIR between bakes, so the cost above is paid once per region and
+# not once per bake. A missing DEM tile is the sea and is an answer; any other HTTP failure
+# aborts, because a half-read elevation source silently un-classifies a mountain range.
 echo "[$NAME] export + tile"
 mkdir -p "$OUT"
 osmium export "$FILTERED" -f geojsonseq --add-unique-id=type_id -o - \

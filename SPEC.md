@@ -205,7 +205,15 @@ Revision 2 adds eight landmark kinds (§10.2), an optional `ele` and an optional
 a landmark, two optional per-way attributes (§10.6), and **splits the `green` habitat class
 into `woodland` and `greenspace`** (§10.3, §10.4). Nothing is removed and no key changes
 meaning, so **the version is not bumped** — this is additive over revision 1 in exactly the
-way v5 was additive over v4. A revision-1 client skips landmark kinds it does not know (its
+way v5 was additive over v4.
+
+**Revision 3 (2026-07-30) is elevation, and it is additive in the same way.** The `m`
+(mountain) grid character revision 2 reserved is now EMITTED, its atlas bit is now SET, and
+the `peak` significance score is now computed from local relief rather than from height
+above sea level (§10.4, §10.8, §10.9). No key changes meaning and nothing is removed; a
+revision-2 client decodes `m` as an unknown character and the cell falls back to rural,
+which is the same quiet degradation `w`/`s` already rely on. There is no revision-3-only
+field to skip. The version stays `v: 5`. A revision-1 client skips landmark kinds it does not know (its
 parser already whitelists), ignores way keys it does not read, and decodes an unknown
 habitat character to nothing. Four behaviour changes such a client *will* see, all
 degradation rather than breakage:
@@ -405,7 +413,7 @@ Codes:
 | `w` | woodland | revision 2 |
 | `s` | greenspace | revision 2 |
 | `.` | rural | the default |
-| `m` | mountain | **RESERVED, not emitted.** The client vocabulary declares it; the classifier needs an elevation source (Copernicus GLO-30 relief) this bake does not have. Revision 2's named peaks with `ele` are its calibration set. |
+| `m` | mountain | revision 3 — regional relief from Copernicus GLO-30 (§10.4, §10.9) |
 | `g` | ~~green~~ | **RETIRED in revision 2.** Never re-spent. |
 
 **`g` is retired, not reused, and that is a compatibility decision.** Revision 1's `g` meant
@@ -428,13 +436,13 @@ What each side sees across the boundary:
   CDN contains `g` at all (all five live v5 slices are re-baked), so the only `g` left is in
   on-device caches, for at most their 30-day TTL.
 
-### 10.4 Habitat classifier — v2, normative
+### 10.4 Habitat classifier — v3, normative
 
 The vocabulary is Ausculta's `packages/content/src/habitat.ts` exactly:
-`urban | residential | woodland | greenspace | rural` (plus `mountain`, which that module
-declares and this bake does not yet produce — see §10.3). Ausculta's server re-derives spawns
-from these classes, so the classification must be reproducible from this spec
-+ the OSM extract. It is a pure function of two per-cell aggregates:
+`mountain | urban | residential | woodland | greenspace | rural`. Ausculta's server
+re-derives spawns from these classes, so the classification must be reproducible from this
+spec + the OSM extract **and, since revision 3, one published elevation product** (§10.9).
+It is a pure function of three per-cell aggregates:
 
 **Way length per group.** Each walkable-way segment (the same osmium-filtered
 ways v4 ships) is cut into `ceil(len/20 m)` equal steps and each step's length
@@ -443,6 +451,10 @@ Groups: `res` = `residential|living_street`, `foot` =
 `footway|path|pedestrian|steps|track`, `road` = `service|unclassified`.
 (`living_street` counts as `res` here even though v4's `foot` flag includes
 it — habitat cares that people live on it.)
+
+**Regional relief.** Revision 3's addition, and the only input that is not in the OSM
+extract. Fully specified in the block below, because the whole `mountain` class rests on it
+and a plpgsql port has to reproduce it post for post.
 
 **Cover.** Each cell has a 2×2 sample grid (at 0.25/0.75 of the cell in
 each axis); a sample is covered when it falls inside a landcover polygon
@@ -453,15 +465,131 @@ wooded corner of a park — sets both. `coverFrac` is the count of samples insid
 / 4, which is bit-for-bit revision 1's single `greenFrac`.
 
 Rules apply **in order**, first match wins (`all = foot + res + road`;
-thresholds are the `HAB` constant in `tile.mjs`):
+thresholds are the `HAB` and `MOUNTAIN_*` constants in `tile.mjs`):
 
-1. **green family** if `coverFrac ≥ 0.5` **and** `foot > 0` — trackless forest is
+1. **mountain** if `all > 0` **and** `relief ≥ 500 m` — revision 3. `relief` is the
+   regional relief defined below; a missing relief never matches (abstention).
+2. **green family** if `coverFrac ≥ 0.5` **and** `foot > 0` — trackless forest is
    rural; a wood with a path through it is walkable green. (Without the `foot`
    guard, ~40% of Massachusetts' green cells were unreachable forest.)
-2. **urban** if `all ≥ 900 m` and `res/all ≤ 0.35`
-3. **green family** if `foot ≥ 120 m` and `foot/all ≥ 0.7`
-4. **residential** if `res ≥ 120 m` and `res/all ≥ 0.4`
-5. **rural** otherwise — including cells with no data at all (the default).
+3. **urban** if `all ≥ 900 m` and `res/all ≤ 0.35`
+4. **green family** if `foot ≥ 120 m` and `foot/all ≥ 0.7`
+5. **residential** if `res ≥ 120 m` and `res/all ≥ 0.4`
+6. **rural** otherwise — including cells with no data at all (the default).
+
+**Mountain claims first**, because regional relief is the coarsest and most stable fact
+about a cell: a wooded mountainside is a mountain and a lake in a corrie is a mountain. The
+finer classes describe what is ON the ground; this one describes the ground. The cost is
+stated rather than hidden — measured on the vermont trial bake, 2026-07-30, mountain takes
+cells from every other class and roughly halves the green family in a mountainous state:
+
+| vermont, of 1,266,781 distinct spawn cells | before (revision 2) | after (revision 3) |
+|---|---|---|
+| rural | 90.4% | 86.2% |
+| **mountain** | — | **8.8%** |
+| residential | 4.5% | 2.7% |
+| woodland | 3.8% | 1.4% |
+| greenspace | 1.3% | 0.8% |
+| urban | 0.04% | 0.04% |
+
+The District of Columbia is a **strict no-op**: 38.4% rural / 30.9% urban / 12.4%
+greenspace / 9.3% woodland / 9.0% residential before and after, `mountain` 0.0%, and its
+v5 hash manifest is byte-identical across the change. Its 17 named "peaks" are 28–123 m
+city hills and its highest regional relief anywhere is 144 m, a factor of 3.5 below the
+threshold — which is what makes it the sharpest available test that the rule does not
+over-claim.
+
+`all > 0` is the same guard as the green rule's `foot > 0`, at the strength this class
+needs. Spawns snap to walkable ways, so a cell with no walkable way of any kind places
+nothing, and classifying it would put a creature where nobody can stand. It is `all` and
+not `foot` because a mountain town has streets and a creature that lives there is welcome
+to them — that IS the "a city in the mountains counts" case.
+
+#### Regional relief — normative, and the whole of the `mountain` rule
+
+`relief(cx, cy)` is the elevation range over a **disc of radius 5,000 m** centred on the
+spawn cell, sampled at one DEM post per spawn cell.
+
+**The sample.** One elevation per spawn cell: the Copernicus GLO-30 post nearest the cell
+centre (§10.9). The post index is exact integer arithmetic, never a rounded float:
+
+```
+kx = floor(((2·cx + 1)·3·W + 2000) / 4000)      W = the DEM tile's COLUMNS per degree
+ky = floor(((2·cy + 1)·3·3600 + 2000) / 4000)       (3600, 2400, 1800 or 1200 — §10.9)
+```
+
+Both are `round((c + 0.5)·0.0015·posts_per_degree)` evaluated on the exact rational. The tie
+is real and frequent, not hypothetical: at `W = 3600` the cell centre lands exactly halfway
+between two posts for one cell in five (`cx ≡ 2 mod 5`), and which one a float lands on is
+decided by whether `0.0015·3600`'s binary representation sits above or below `5.4`. The
+integer form is round-half-up and is identical in JS, in plpgsql and by hand.
+
+**The window.** For a slice, let `cellNS = 0.0015 · 111320 = 166.98 m` and
+`cellEW = cellNS · cos(latMid)`, where `latMid` is the latitude of the middle row of the
+grid being classified. Then
+
+```
+ry     = ceil(5000 / cellNS)                                     = 30
+rx[dy] = floor(sqrt(5000² − (dy·cellNS)²) / cellEW)   for 0 ≤ dy ≤ ry, and −1 when dy·cellNS > 5000
+```
+
+and the window is every cell `(cx + dx, cy + dy)` with `|dy| ≤ ry` and `|dx| ≤ rx[|dy|]`.
+`relief = max − min` of the sampled elevations over that window, ignoring cells whose own
+sample is missing.
+
+Three choices in that, each load-bearing:
+
+- **A disc, not a square.** A square of half-width R reaches R·√2 into its corners. Measured
+  on Vermont at R = 5 km and a 450 m threshold, the square calls 59.2% of spawn cells
+  mountain and the disc calls 50.3% — the corner is a 41% longer reach in the direction of
+  whatever the nearest mountain happens to be, not a rounding error.
+- **Columns are latitude-corrected, rows are not.** A 0.0015° cell is 167 m north-south
+  everywhere and 167·cos(lat) m east-west. A window counted in cells rather than metres
+  would shrink to 2.3 km east-west in Swedish Lapland, which is the exact case ("a city IN
+  the mountains counts") the threshold was calibrated on.
+- **`latMid` is evaluated ONCE per grid, not per row.** A slice spans a few degrees and cos
+  changes the column count by a few percent across it. Per-row evaluation would put a float
+  comparison at every row boundary; per-grid makes the window a stated property of the
+  slice, printed in the bake log (`[tile] relief: … 30 rows x 41 cols at the widest`).
+
+**The threshold is 500 m,** and it is a calibration, not a measurement. The definition was
+settled by three cases — a city IN the mountains counts, a big hill inside a city does not,
+the Rockies count — which between them rule out absolute elevation (a Swedish fjäll town
+sits lower than flat Denver at 1,600 m) and slope (a city hill is the steepest thing for
+miles; a Rockies valley floor is flat). What separates them is the RADIUS at which relief is
+measured. 5 km is where the separation is widest on real terrain: measured on Vermont, at
+4 km the mountain village of Stowe scores 466 m and the rolling Northeast Kingdom hills at
+Island Pond score 403 — no gap — and at 6 km Montpelier climbs to 345 m and erodes it from
+the other side. At 5 km the valley towns run 111–458 m and the mountain towns run 568–1074,
+and nothing lands in between. 500 m is the top of the 400–500 m band originally proposed,
+because 450 admits Island Pond.
+
+Checked worldwide against the same disc, 2026-07-30 (metres of relief):
+
+```
+Denver 88   Stockholm 90   Boston Common 70   Phoenix 57   Amsterdam 50   Miami 26
+Colorado Springs 223   Sheffield 246 (England's steepest city)   Flagstaff 270   Kiruna 338
+──────────────────────────────── threshold 500 ────────────────────────────────
+Salt Lake City downtown 528   Leadville 726   Estes Park 780 (a Rockies VALLEY FLOOR)
+Keswick 787   Boulder 868   Björkliden 956   Åre 1044 (the fjäll town)   Alta 1234
+Provo 1371   Zermatt 2132   Chamonix 2603
+```
+
+Flagstaff (270 m) and Kathmandu (455 m) fall below, and that is the honest cost: both sit on
+a plateau or a valley floor whose mountains are 10–15 km away, which is further than a walk.
+
+**Where the DEM has no coverage, ABSTAIN — never guess.** The archive publishes no tile for
+open ocean and none above its northern limit. A cell whose OWN sample is missing has
+`relief = undefined` and rule 1 cannot match, so it falls through to rules 2–6 exactly as a
+revision-2 cell would; it is never `mountain` and never any other class it would not
+otherwise have been. A window that merely CLIPS a missing tile — every coastal mountain —
+still has land in it and still has a relief, computed over the samples that exist. The two
+cases are different on purpose: an unmeasured cell is not a flat cell, but a partly
+unmeasured window is still a measured window.
+
+The same rule covers a bake run with no elevation source at all (`DEM_DISABLE=1`): every
+relief is missing, no cell is `mountain`, and the bake prints a banner saying so, because
+"no mountains anywhere" and "no mountains here" are the same output and only one is true.
 
 **Which green.** Rules 1 and 3 select the *family*; this selects the member, and it is
 deliberately a separate question:
@@ -530,6 +658,15 @@ measurement after the first one:
   it `boundary=protected_area` — where this could plausibly add ~10^5 tiles, ~15 MB and
   ~$0.45 of Class-A writes. That is the price of a national park being visible from
   anywhere inside it rather than only near its centroid.
+- **Revision 3 (elevation) adds NO bytes and rewrites a third of a mountain state.**
+  Measured on the trial bakes, 2026-07-30: tile *counts* are unchanged (188 and 28,445), the
+  atlas is unchanged at 209 B and 693 B, and the habitat sidecar grows only because
+  `mountain` is non-rural and therefore listed — vermont 5.6 MB → **7.8 MB**, 122,108 →
+  174,379 lines. What changes is the RE-UPLOAD SET: **0 of the District's 188 v5 tiles** (it
+  has no mountain and its anchor is unchanged, so the bake is byte-identical) and **10,442 of
+  vermont's 28,445 (36.7%)**, of which 10,423 carry at least one `m`. A slice with no relief
+  costs nothing to re-bake; a mountainous one costs a third of its tiles.
+
 - **The anchor flag and sidecar (§10.8) are free.** Measured on the trial bakes,
   2026-07-30: `anchor: true` costs **+83 B** across the District's 188 v5 tiles and
   **+17,756 B** across Vermont's 28,445 — 0.0005% and 0.012% of v5 bytes — because there
@@ -623,7 +760,7 @@ character per mask, over a **dense raster** of the slice's block bounding box:
 | 1 | 2 | `residential` |
 | 2 | 4 | `woodland` |
 | 3 | 8 | `greenspace` |
-| 4 | 16 | `mountain` — **RESERVED, never set today** (§10.3: no elevation source) |
+| 4 | 16 | `mountain` — set as of revision 3 (§10.4) |
 | 5 | 32 | `rural` |
 
 ```jsonc
@@ -642,8 +779,7 @@ out, so there is no second convention to learn. Index `= (by−by0)·cols + (bx�
 Alphabet is `A–Z a–z 0–9 - _` at indices 0–63; base64url rather than standard base64
 because `-`/`_` need no escaping in a JSON string, a URL path or a shell, whereas a `/`
 invites a `\/` from a defensive encoder and the raster stops round-tripping byte-for-byte.
-Six bits is exactly the class vocabulary's width including the reserved `mountain`, so a
-mask never needs a second character.
+Six bits is exactly the class vocabulary's width, so a mask never needs a second character.
 
 Dense rather than a sparse `{blockKey: mask}` map: a JSON object entry costs ~20 B against
 1 B for a raster slot and a state's bbox is far more than 5% occupied (Vermont, a diagonal
@@ -683,6 +819,13 @@ woodland creature be there at all"), and a threshold would silently delete real 
 woods. A consumer that needs confidence should prefer a class with a low thin-block ratio,
 or wait for a threshold to be specified.
 
+**Measured, revision 3 (2026-07-30, `--trial`, nothing uploaded):** vermont's raster is
+unchanged at 693 B — a mountain bit costs nothing, because the raster is dense and the bit
+was already allocated. 228 of vermont's 346 occupied blocks (65.9%) now claim `mountain`,
+against 226 for `woodland`; 3 of those rest on a single spawn cell (1.3%, the steadiest of
+any class — a 5 km relief window does not produce isolated cells the way one crossroads
+produces an isolated `urban`). The District claims `mountain` in **0** of its 6 blocks.
+
 **Measured, first bake (2026-07, `--trial`, nothing uploaded):**
 
 | slice | file | occupied blocks | raster | B / occupied block |
@@ -701,7 +844,9 @@ Mount Mansfield and Killington Peak, which both carry `woodland`.
 
 **Verification.** `inspect-bake.mjs` cross-checks the atlas against the habitat sidecar
 **by value**, block for block: every non-rural bit the sidecar's cells imply must be set in
-the atlas and no non-rural bit may be set without a sidecar cell backing it. An atlas built
+the atlas and no non-rural bit may be set without a sidecar cell backing it. `mountain` is
+inside that check as of revision 3 — it was skipped while the bit could only ever be 0, and
+leaving it skipped would have made the one new bit the only unverified one. An atlas built
 from the tile grids instead would disagree exactly at a state line, and `typeof atlas ===
 'object'` would never notice. Both trial slices report `AGREES — 0 missing bits, 0 unbacked
 bits, 0 sidecar blocks off-raster`.
@@ -779,7 +924,7 @@ is what makes a cemetery comparable to a national park with no hand-set per-kind
 | `park`, `common` | 1×10⁵ m² |
 | `cemetery` | 5×10⁴ m² |
 | `library` | 1×10⁴ m² |
-| `peak` | `ele`, see below |
+| `peak` | local relief, see below |
 | `city`, `town`, `village`, `hamlet`, `suburb` | **`null` — abstain** |
 
 The area references are read off the measured trial distributions: park p90 is 64,602 m²
@@ -795,23 +940,57 @@ A point that does not locate the thing at walking scale cannot anchor a creature
 spending a cell's one anchor on `city@Washington` spends it on an arbitrary downtown
 intersection.
 
-**A summit is scored from `ele`, and the bridge to an area is dimensional.** At a fixed
-hillside slope a summit of height *h* has a footprint ∝ *h*², so `log2` of that footprint is
-`2·log2(h)` — the slope cancels out of the ranking entirely and only a reference height
-survives:
+**A summit is scored from its LOCAL DROP, and the bridge to an area is dimensional.** At a
+fixed hillside slope a summit standing *h* metres above its own ground has a footprint
+∝ *h*², so `log2` of that footprint is `2·log2(h)` — the slope cancels out of the ranking
+entirely and only a reference height survives:
 
-> `sig(peak) = 2 · log2(ele / PEAK_ELE_REF_M)`, `PEAK_ELE_REF_M = 105`.
+> `drop(peak)` = elevation of the GLO-30 post nearest the node, minus the LOWEST post
+> within `PEAK_RELIEF_R_M` = **2,000 m** of it, over the disc of §10.4's window rule at
+> post spacing (§10.9). `sig(peak) = 2 · log2(drop / PEAK_RELIEF_REF_M)`,
+> `PEAK_RELIEF_REF_M = 60`. A peak whose own post has no DEM coverage has no `drop` and
+> scores `−Infinity`, which is below `ANCHOR_SIG_MIN` — abstention, not a guess.
 
-105 m is where a named summit becomes a locally notable high point: the District's 17 named
-summits run 28–123 m (median 56), so its own best hills score around zero, which is what a
-reference is supposed to mean.
+**Revision 3 changed this line, and revision 2 predicted it would.** It used to read `ele`,
+which is height above **sea level**, so a 1,700 m bump on the Colorado plateau out-scored
+every city park in the country and the spec could only warn about it. `drop` is a fact about
+the ground the summit stands on and is comparable across a continent.
 
-**The limitation, stated.** `ele` is height above **sea level**, not prominence, and this
-bake has no elevation source to subtract a base from — the same gap that leaves the `m`
-habitat character reserved and unemitted (§10.3). Comparisons are only ever made *within
-one anchor cell*, where the valley floor is near enough constant for this to hold; across a
-continent it is not, and a 1,700 m bump on the Colorado plateau will out-score a city park
-it has no business out-scoring. When Copernicus relief lands, this is the line that changes.
+**DROP, not the window's RANGE**, and that distinction is the whole filter. `max − min` over
+a window counts summits *higher* than the peak, so a knob beside a mountain scores as if it
+were the mountain. Measured on the vermont trial, 2026-07-30: ranking by range gave the
+state's twelve anchors to Table Rock, The Cobble (265 m) and Bear Mount and left out Mount
+Mansfield, Killington Peak and Camels Hump. Range detects cliffs; drop measures the summit.
+
+**R = 2,000 m, and it is the massif's shoulder that sets it.** The window has to be wider
+than the ridge a summit sits on, or it ranks the ridge. Measured, drop in metres:
+
+| | R = 1,000 | R = 1,500 | R = 2,000 |
+|---|---|---|---|
+| Mount Mansfield | 546 | 729 | **837** |
+| Adams Apple (a knob 1 km along the same ridge) | 597 | 734 | 766 |
+| Bear Head (2 km along the same ridge) | 597 | 663 | 691 |
+| Killington Peak | 381 | 471 | **538** |
+| Little Killington | 344 | 430 | 485 |
+
+At 1 km Mansfield loses its own anchor cell twice over; at 1.5 km it loses to Adams Apple by
+five metres; at 2 km it leads Vermont outright and every named sub-summit of Mansfield,
+Killington and Equinox falls behind its parent. Wider is not free — at 3 km Mt Ascutney
+falls behind Ascutney North, because the window stops being local at all.
+
+**REF = 60 m**, the same construction the retired 105 m did, on a quantity that means
+something. The District's 17 named summits run **38–103 m** of drop over a 2 km disc with a
+**median of 60**, so its own hills score around zero. Below that is the surface model's own
+noise (§10.9): Vermont's flattest named "hills" — Stanhope Hill, The Hurricane, Upper
+Diggings — measure **24–36 m**, which is a name attached to a road bend. Point Reno, which
+is genuinely the District's high point, measures **84 m** and scores **+0.97** where `ele`
+gave it +0.46. Only Vermont's Stanhope Hill and a handful like it fall below zero, and that
+is the filter working as specified: it is a floor under a *ranking*, and the ranking is
+where the change shows.
+
+The scale is preserved on purpose — Mansfield scores 7.6 against `ele`'s 7.4 and Vermont's
+median summit 4.2 against ~4.5 — so the AREA references above, which were read off the same
+trial distributions and balanced against the old peak scores, still hold unchanged.
 
 #### The cap — three terms, each doing a job the other two cannot
 
@@ -867,3 +1046,76 @@ sidecar, not the tile flag, is the authority.
 continental US and ~7×10⁴ globally, against the habitat sidecar's 277k *non-rural cells per
 state*. It is a small table, and the per-tile payload cost is `+83 B` over the District's
 188 tiles and `+17,756 B` over Vermont's 28,445 — 0.0005% and 0.012% of v5 bytes.
+
+### 10.9 Elevation source — Copernicus GLO-30, normative
+
+The only input to this bake that is not the OSM extract. `mountain` (§10.4) and the `peak`
+significance score (§10.8) both read it, and both must be reproducible, so the product and
+the way it is addressed are specified here rather than left to the implementation.
+
+**Product.** Copernicus DEM GLO-30 (2021 release, ~30 m), on AWS Open Data. **Anonymous
+HTTPS, no credentials, no requester-pays**, and `Accept-Ranges: bytes`:
+
+```
+https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_<TILE>_DEM/Copernicus_DSM_COG_10_<TILE>_DEM.tif
+<TILE> = N44_00_W073_00     the SW corner, zero-padded to 2 and 3 digits
+```
+
+One file per 1° cell. Cloud-optimised GeoTIFF: float32, tiled 1024 × 1024, Compression 8
+(Adobe Deflate), Predictor 3 (floating point), **`GTRasterTypeGeoKey = 2`, pixel-is-point**.
+Three overview IFDs exist and are **deliberately not used** — they are GDAL's average of
+8 × 8 posts, and averaging a summit destroys the quantity being measured; worse, it would
+make a re-derivation depend on reproducing one C library's resampling.
+
+**The lattice.** Pixel-is-point puts post (0,0) exactly on the tile's NW degree corner, so
+there is no half-pixel offset anywhere. Tile `N44_00_W073_00` holds `ky ∈ (44·3600,
+45·3600]` and `kx ∈ [−73·W, −72·W)`, and
+`row = 3600·(tileLat+1) − ky`, `col = kx − tileLng·W`. Note the latitude asymmetry: the post
+exactly on lat 44 belongs to **N43**, so `tileLat = floor((ky − 1) / 3600)`.
+
+**LONGITUDE IS DECIMATED ABOVE 50°N, and a port that assumes otherwise fails silently.**
+Rows are 1 arc-second everywhere — height is always 3600. Columns are not. Measured by
+fetching headers, 2026-07-30:
+
+| band | N44 | N52 | N59 | N63 | N68 | N71 | N76 |
+|---|---|---|---|---|---|---|---|
+| columns per degree (`W`) | 3600 | 2400 | 2400 | 1800 | 1800 | 1200 | 1200 |
+
+`W` **must be read from each tile's own `ImageWidth`**, not from a latitude table: the
+published handbook says 5 arc-seconds above 75°N and the archive ships 3. This bake got it
+wrong once and the failure was total and invisible — reading a 2400-wide tile as if it were
+3600 wide indexes past the end of a raster row into the *next* row's block, which is a
+perfectly valid float32 array from somewhere else in the tile. Keswick, ringed by 900 m
+fells, reported **0 m** of relief; Amsterdam reported 0 m too, so nothing looked wrong.
+`typeof elev === 'number'` was true throughout. Assert on a value.
+
+**It is a surface model, not a terrain model.** GLO-30 includes canopy and buildings. Over a
+5 km disc that is noise against a 500 m threshold and is ignored; over the 2 km disc §10.8
+uses it is roughly 20–30 m of apparent drop with no landform under it, and that is exactly
+what the 60 m reference is set above.
+
+**Missing tiles are an ANSWER.** The archive publishes no tile for open ocean, and a 404 or
+403 means "no land here" — the caller abstains (§10.4). **Any other status is an error and
+must abort the bake**: an elevation source that half-works would silently un-classify a
+mountain range, and a bake that quietly loses a class is the failure mode this whole format
+is written to prevent.
+
+**Cost, measured on a cold cache, 2026-07-30.** Only the 1024 × 1024 blocks the slice
+actually needs are fetched, by HTTP range, not whole tiles:
+
+| slice | 1° tiles touched | blocks | fetched | whole tiles would have been |
+|---|---|---|---|---|
+| district-of-columbia | 4 | 6 | **11.7 MB** | ~180 MB |
+| vermont | 12 | 120 | **255.2 MB** | ~539 MB |
+
+Sampling and the relief pass together take **4.9 s** for the District (182 × 138 cells) and
+**84 s** for Vermont (1,345 × 1,803 cells), against a ~2 minute tiling pass — the disc is
+O(N·ry) rather than separable, and that is the price of the shape (§10.4).
+
+Blocks are cached on disk between bakes (`DEM_CACHE_DIR`, default
+`~/.cache/walkable-tiles/dem`) and the cache is **deliberately outside the slice's temp
+directory**, which `bake-slice.sh` deletes on exit — a calibration loop re-bakes the same
+slice repeatedly and would otherwise re-download hundreds of megabytes each time. On a
+GitHub runner the cache is cold every run; the download is inside the existing 120-minute
+timeout and costs nothing, and a state's DEM is a fraction of the ~1.1 GB Geofabrik extract
+it is baking beside.
