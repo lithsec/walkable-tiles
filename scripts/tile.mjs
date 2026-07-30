@@ -304,6 +304,56 @@ const HAB_CODE = { urban: 'u', residential: 'r', woodland: 'w', greenspace: 's',
 const MOUNTAIN_RELIEF_R_M = 5000;
 const MOUNTAIN_RELIEF_MIN_M = 500;
 
+// ---- v5c: the COARSE landcover layer (SPEC §10.10) -----------------------------------
+//
+// THE MEASUREMENT THAT FORCES THIS ARTIFACT. A v5 tile is ~890 KB in a city (downtown SLC
+// 891 KB, Boston 911 KB — measured on the live CDN), and the app's tile cache is 128 MiB
+// TOTAL. Ausculta wants a map that zooms out to ~5 km while gameplay stays at 600 m, and
+// the request set for a 5 km radius is ~165 cells: ~145 MB in one pinch, more than the
+// entire cache. Raising the live radius cannot do it. The habitat atlas (§10.7) cannot
+// either — 693 B for all of Vermont, but its blocks are 8 × 11 km, which is a pixel at the
+// zoom this is for. NOTHING SERVED THE BAND BETWEEN 600 m AND 10 km.
+//
+// WHERE THE SAVING COMES FROM: ways. A v5 tile is 98.8% ways/names/crossings (measured:
+// downtown SLC v4 880,063 B vs v5 890,931 B), and at 5 km a street is a hair. So the coarse
+// artifact carries SHAPE ONLY — simplified landcover polygons and nothing else. No ways, no
+// crossings, no names, no habitat grid, no landmarks. Each of those is refused for its own
+// reason and §10.10 records them.
+//
+// GRANULARITY: ONE ARTIFACT PER v5 TILE, on the SAME 0.01° grid, at `v5c/<i>/<j>.json.gz`.
+// A block of 4 × 4 or 16 × 16 tiles would cut the round trips for a 5 km view from ~165 to
+// ~25 or ~9, and it was rejected because of §4. Ownership is per CELL CENTRE, so a coarser
+// block is owned by whichever slice holds its centre — and that slice bakes it from an
+// extract that carries its neighbour's geometry only as far as Geofabrik's buffer reaches.
+// A 0.16° block therefore leaves a blank ribbon up to 17 km wide along every slice
+// boundary, at exactly the zoom this artifact exists for. On the 0.01° grid that ribbon is
+// the 1.1 km the v5 tiles already accept and no zoom can see. The stated problem is BYTES
+// (a 128 MiB cache against a 145 MB fetch), not round trips — the client already asks for
+// ~165 cells at that radius today — so the grid that costs nothing in correctness wins.
+//
+// CLIPPED TO THE CELL RECT, NOT TO THE ±1200 m BOX. v5 clips to the box and the client
+// dedupes the seam copies; ~165 overlapping boxes would be ~9× the bytes for the same
+// ground. Clipping to the cell makes the coarse tiles a PARTITION — every polygon appears
+// in exactly the cells it covers, adjacent pieces abut, the union is seamless and the
+// client needs no dedupe at all. The rect is padded by COARSE_CLIP_PAD_M so abutting pieces
+// overlap by a hair: two exactly-abutting fills leave an antialiasing hairline, and the
+// renderer composites a class's polygons under one group opacity, so a slight overlap
+// unions away invisibly (the same property that already lets v5's seam duplicates paint).
+const COARSE_SIMPLIFY_TOL_M = 50;
+// Drop anything smaller than this BEFORE clipping. At the ~5 km span this layer is drawn
+// at, a full-width phone panel is ~390 SVG units across, so one unit is ~12.8 m: a
+// 50,000 m² blob is a 224 m square, 17.5 units, the smallest thing that reads as a SHAPE
+// rather than as a speck. Below it a page is dots, and a page of dots is noise.
+const COARSE_MIN_AREA_M2 = 50000;
+// Post-clip sliver floor, half the pre-clip one — the same 2:1 ratio §10.1 uses.
+const COARSE_MIN_CLIPPED_M2 = 25000;
+const COARSE_CLIP_PAD_M = 40;
+// Coordinate rounding. 1e-5° is ~1.1 m: 45× finer than the simplification tolerance and
+// well inside the clip pad, so it cannot open a seam, and it is one character per
+// coordinate cheaper than §10.1's 1e-6. A tenth of a metre on a shape that is honestly
+// ±50 m is a precision this artifact does not have.
+const COARSE_ROUND = 5;
+
 // ---- habitat atlas (SPEC §10.7) — which classes OCCUR in each coarse block ----------
 // A block is ATLAS_BLOCK_CELLS × ATLAS_BLOCK_CELLS spawn cells:
 //     bx = floor(cx / 64)     by = floor(cy / 64)     (floor toward −inf, not truncation)
@@ -552,7 +602,14 @@ const mPerDegLng = (lat) => M_PER_DEG * Math.cos(lat * Math.PI / 180);
 // Douglas-Peucker on an open ring, tolerance in meters (planar approximation is fine
 // at these sizes). First/last points anchored; degenerate anchors fall back to
 // point-distance so closed shapes still simplify.
-function simplifyRing(ring, cosLat) {
+// The tolerance is a PARAMETER with §10.1's value as its default, so the v5 call site is
+// character-for-character what it was and only the coarse layer (§10.10) passes anything
+// else. Re-simplifying an already-simplified ring is not the same as simplifying the
+// original at the coarser tolerance — the deviations compose — so a coarse ring is within
+// SIMPLIFY_TOL_M + COARSE_SIMPLIFY_TOL_M of the OSM geometry, not within the latter alone.
+// At 60 m against a layer drawn at 12.8 m per unit that is under five units, and paying a
+// second full pass over the raw rings to save it would double the tiler's landcover cost.
+function simplifyRing(ring, cosLat, tolM = SIMPLIFY_TOL_M) {
   const pts = ring;
   const n = pts.length;
   if (n <= 4) return pts.slice();
@@ -560,7 +617,7 @@ function simplifyRing(ring, cosLat) {
   const sy = M_PER_DEG;
   const keep = new Uint8Array(n);
   keep[0] = keep[n - 1] = 1;
-  const tol2 = SIMPLIFY_TOL_M * SIMPLIFY_TOL_M;
+  const tol2 = tolM * tolM;
   const stack = [[0, n - 1]];
   while (stack.length) {
     const [a, b] = stack.pop();
@@ -1298,6 +1355,152 @@ for (const key of v5Keys) {
   written5++;
 }
 writeFileSync(join(OUT, 'hashes-v5.json'), JSON.stringify(hashes5));
+
+// ================================ v5c write ================================
+// The coarse landcover layer — SHAPE ONLY, for the 600 m → 10 km band the v5 tiles cannot
+// afford and the habitat atlas is too blunt for. See the constants block near the top for
+// why this is per-TILE rather than per-block and why it clips to the cell rect. Everything
+// here is derived from `lcPolys`, the SAME polygons v5's washes come from, so the two
+// layers can never disagree about where a lake is — only about how carefully it is drawn.
+
+// Rings go out as FLAT [lat, lng, lat, lng, …] number arrays rather than §10.1's
+// {lat,lng} objects. v5 uses objects because its ways inherited them from v4 and the client
+// parses them by reference on a hot path; this artifact has no such lineage, and the flat
+// form is ~2× smaller before gzip for a payload that is almost entirely coordinates. The
+// client turns them back into {lat,lng} once, at parse.
+const roundC = (x) => Number(x.toFixed(COARSE_ROUND));
+const toFlat = (ring) => {
+  const a = [];
+  for (const [lng, lat] of ring) a.push(roundC(lat), roundC(lng));
+  return a;
+};
+
+// The padded cell rectangle a coarse polygon is clipped to. Exactly 0.01° plus the hairline
+// pad — NOT v5's ±1200 m box (see the constants block).
+function coarseRect(i, j) {
+  const cLat = (i + 0.5) * TILE_DEG;
+  const latPad = COARSE_CLIP_PAD_M / M_PER_DEG;
+  const lngPad = COARSE_CLIP_PAD_M / mPerDegLng(cLat);
+  return {
+    minLat: i * TILE_DEG - latPad,
+    maxLat: (i + 1) * TILE_DEG + latPad,
+    minLng: j * TILE_DEG - lngPad,
+    maxLng: (j + 1) * TILE_DEG + lngPad,
+  };
+}
+
+const coarsePolys = []; // { cls, rings } — open rings of [lng, lat], simplified to 50 m
+const coarseByCell = new Map(); // 'i:j' -> [idx]
+
+// Bin one coarse polygon to every cell whose padded rect its bbox reaches. By BBOX, so a
+// long diagonal river bins into cells it never actually enters — the clip below then
+// produces nothing and the cell is simply not written. Same shape as `binLandcover`, one
+// grid tighter: the fine binner has to allow for a ±1200 m box that overspills the cell by
+// more than two cells in each direction, and this one only for the pad.
+function binCoarse(idx) {
+  const outer = coarsePolys[idx].rings[0];
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+  for (const [x, y] of outer) {
+    if (y < minLat) minLat = y;
+    if (y > maxLat) maxLat = y;
+    if (x < minLng) minLng = x;
+    if (x > maxLng) maxLng = x;
+  }
+  const latPad = COARSE_CLIP_PAD_M / M_PER_DEG;
+  const iMin = Math.floor((minLat - latPad) / TILE_DEG);
+  const iMax = Math.floor((maxLat + latPad) / TILE_DEG);
+  for (let i = iMin; i <= iMax; i++) {
+    const lngPad = COARSE_CLIP_PAD_M / mPerDegLng((i + 0.5) * TILE_DEG);
+    const jMin = Math.floor((minLng - lngPad) / TILE_DEG);
+    const jMax = Math.floor((maxLng + lngPad) / TILE_DEG);
+    for (let j = jMin; j <= jMax; j++) {
+      const k = i + ':' + j;
+      let list = coarseByCell.get(k);
+      if (!list) coarseByCell.set(k, (list = []));
+      list.push(idx);
+    }
+  }
+}
+
+// The area gate throws polygons away, so the tiler REPORTS what it threw away — as area,
+// not as a count. "186 of 1664 polys survived" reads like a massacre and says nothing; the
+// question a person actually has is how much GROUND stopped being drawn, and the two
+// numbers are wildly different because the discarded polygons are by construction the
+// small ones.
+let coarseAreaIn = 0;
+let coarseAreaOut = 0;
+for (const p of lcPolys) {
+  const outer0 = p.rings[0];
+  if (!outer0 || outer0.length < 3) continue;
+  const cosLat = Math.cos((outer0[0][1] * Math.PI) / 180);
+  coarseAreaIn += ringAreaM2(outer0, cosLat);
+  const outer = simplifyRing(outer0, cosLat, COARSE_SIMPLIFY_TOL_M);
+  if (outer.length < 3) continue;
+  // The area gate is applied to the SIMPLIFIED ring, not the original: the drawn shape is
+  // what has to be big enough to read, and a 50 m simplification can only shrink a small
+  // one further. Holes get the same gate — a clearing too small to draw is not a clearing.
+  const outerArea = ringAreaM2(outer, cosLat);
+  if (outerArea < COARSE_MIN_AREA_M2) continue;
+  coarseAreaOut += outerArea;
+  const rings = [outer];
+  for (let r = 1; r < p.rings.length; r++) {
+    const hole = simplifyRing(p.rings[r], cosLat, COARSE_SIMPLIFY_TOL_M);
+    if (hole.length >= 3 && ringAreaM2(hole, cosLat) >= COARSE_MIN_AREA_M2) rings.push(hole);
+  }
+  binCoarse(coarsePolys.push({ cls: p.cls, rings }) - 1);
+}
+
+// Clip one cell's coarse polygons, drop slivers, order by clipped area descending — the
+// same ordering contract §10.1 gives, so big washes paint first at either fidelity.
+function buildCoarse(i, j, idxs) {
+  const rect = coarseRect(i, j);
+  const cosLat = Math.cos(((i + 0.5) * TILE_DEG * Math.PI) / 180);
+  const out = [];
+  for (const idx of idxs) {
+    const poly = coarsePolys[idx];
+    const outer = clipRingRect(poly.rings[0], rect);
+    if (!outer) continue;
+    const area = ringAreaM2(outer, cosLat);
+    if (area < COARSE_MIN_CLIPPED_M2) continue;
+    const rings = [outer];
+    for (let r = 1; r < poly.rings.length; r++) {
+      const hole = clipRingRect(poly.rings[r], rect);
+      if (hole) rings.push(hole);
+    }
+    out.push({ kind: poly.cls, area, rings });
+  }
+  out.sort((a, b) => b.area - a.area);
+  return out.map((p) => ({ kind: p.kind, rings: p.rings.map(toFlat) }));
+}
+
+mkdirSync(join(OUT, 'v5c'), { recursive: true });
+const hashesC = {};
+let writtenC = 0;
+let coarseRings = 0;
+for (const [key, idxs] of coarseByCell) {
+  const [i, j] = key.split(':').map(Number);
+  if (!owns(i, j)) continue; // §4's exactly-one-writer rule, unchanged and on the same grid
+  const landcover = buildCoarse(i, j, idxs);
+  if (!landcover.length) continue;
+  for (const lc of landcover) coarseRings += lc.rings.length;
+  // `v: 1` is this ARTIFACT's own version and is deliberately not 5. It is a separate
+  // object at a separate prefix with a separate shape; giving it the tile version would
+  // promise that a v5 parser can read it, which it cannot and never should try to.
+  const payload = { v: 1, landcover };
+  const json = JSON.stringify(payload);
+  hashesC[key] = createHash('sha256').update(json).digest('hex');
+  const dir = join(OUT, 'v5c', String(i));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, String(j) + '.json.gz'), gzipSync(Buffer.from(json)));
+  writtenC++;
+}
+writeFileSync(join(OUT, 'hashes-v5c.json'), JSON.stringify(hashesC));
+console.error(
+  `[tile] v5c: ${writtenC} coarse tiles, ${coarsePolys.length} of ${lcPolys.length} polys ` +
+    `survived the ${COARSE_MIN_AREA_M2 / 1000}k m² gate — ` +
+    `${((100 * coarseAreaOut) / Math.max(1, coarseAreaIn)).toFixed(1)}% of the landcover AREA ` +
+    `kept, ${coarseRings} clipped rings -> ${OUT}/v5c`,
+);
 
 // ---- Landmark anchor sidecar (SPEC §10.8, docs/LANDMARK-SPAWNS.md Option A) ----------
 // One line per DISTINCT anchor, sorted by key. Not one per tile LISTING: proximity and

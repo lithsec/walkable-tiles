@@ -17,9 +17,12 @@ const server = http.createServer(async (req, res) => {
   const cors = { 'access-control-allow-origin': '*' };
   try {
     const { pathname } = new URL(req.url, 'http://local');
-    // Confine to /v4/**/*.json.gz and /v5/**/*.json.gz; strip any ../ traversal.
+    // Confine to /v4/, /v5/ and /v5c/ **/*.json.gz; strip any ../ traversal. `/v5c/` needs
+    // its own prefix test rather than riding on `/v5`: a `startsWith('/v5')` would also
+    // admit any future `/v5whatever`, and the point of the list is that it is a whitelist.
     const rel = normalize(pathname).replace(/^(\.\.(\/|\\|$))+/, '');
-    if (!(rel.startsWith('/v4/') || rel.startsWith('/v5/')) || !rel.endsWith('.json.gz')) {
+    const served = rel.startsWith('/v4/') || rel.startsWith('/v5/') || rel.startsWith('/v5c/');
+    if (!served || !rel.endsWith('.json.gz')) {
       res.writeHead(404, cors).end();
       return;
     }
@@ -37,5 +40,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`serving ${ROOT}/v4 + ${ROOT}/v5 on http://localhost:${PORT}  (404 = no tile for that cell)`);
+  console.log(
+    `serving ${ROOT}/v4 + ${ROOT}/v5 + ${ROOT}/v5c on http://localhost:${PORT}` +
+      `  (404 = no tile for that cell)`,
+  );
 });

@@ -34,6 +34,13 @@ function* tiles(dir) {
   }
 }
 
+// The tile grid, verbatim from the bake (`tile.mjs`) and from the app
+// (`@lithsec/audio_modules/tiles`). Declared here rather than imported because this script
+// has no dependency on either tree — and asserted against nothing, so it is the one number
+// in this file that must be kept in step by hand.
+const TILE_DEG = 0.01;
+const M_PER_DEG_LAT = 111320;
+
 const HABITAT_NAME = { u: 'urban', r: 'residential', w: 'woodland', s: 'greenspace', m: 'mountain', '.': 'rural' };
 // Named summits, for the peak-prominence report below. `ele` is what the tile SHIPS (the
 // OSM tag); the score that ranks it is local drop from the DEM (SPEC §10.8), and the two
@@ -51,6 +58,11 @@ const landmarkAnchors = new Map(); // `<kind>@<latE6>,<lngE6>` -> landmark entry
 const landcoverKinds = new Map();
 const flaggedAnchors = new Map(); // the same key, for entries carrying `anchor: true`
 const namedLandmarks = [];
+// Compressed bytes on disk per cell, for BOTH fidelities. These feed the only number that
+// justifies the coarse layer's existence: what one zoomed-out view actually costs to fetch
+// (see `reportCoarse`). Keyed `i:j`, and the byte count is the gzipped file — what crosses
+// the wire and what `TILE_EVICTION.maxBytes` counts, not the JSON's length.
+const v5Bytes = new Map();
 let tileCount = 0;
 let waysTotal = 0;
 let waysLit = 0;
@@ -58,8 +70,17 @@ let waysAccess = 0;
 let withEle = 0;
 let unknownCodes = new Set();
 
+/** `<root>/<i>/<j>.json.gz` -> `i:j`, the cell key both hash manifests use. */
+function cellKeyOf(root, file) {
+  const rel = path.relative(root, file);
+  const m = /^(-?\d+)[/\\](-?\d+)\.json\.gz$/.exec(rel);
+  return m ? `${m[1]}:${m[2]}` : null;
+}
+
 for (const f of tiles(v5)) {
   tileCount++;
+  const k = cellKeyOf(v5, f);
+  if (k) v5Bytes.set(k, statSync(f).size);
   const d = JSON.parse(gunzipSync(readFileSync(f)).toString('utf8'));
 
   for (const w of d.ways ?? []) {
@@ -102,6 +123,11 @@ const cells = habitat.size;
 
 const pct = (n, d) => (d === 0 ? '  —  ' : `${((100 * n) / d).toFixed(1)}%`.padStart(6));
 const row = (k, n, d) => `  ${String(k).padEnd(14)} ${String(n).padStart(8)}  ${pct(n, d)}`;
+const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
+const kb = (n) => `${(n / 1024).toFixed(1)} KB`;
+/** Percentile off an ascending array. Index, not interpolation — these are byte totals of
+ *  real views, so the honest answer is "one of the views actually cost this". */
+const at = (xs, p) => (xs.length ? xs[Math.min(xs.length - 1, Math.floor(p * xs.length))] : 0);
 
 console.log(`\n${tileCount} v5 tiles in ${path.relative(process.cwd(), outDir)}\n`);
 
@@ -122,6 +148,7 @@ if (unknownCodes.size > 0) {
 }
 
 reportAtlas();
+reportCoarse();
 
 console.log(`\n── landcover polygons ──`);
 for (const [k, n] of [...landcoverKinds].sort((a, b) => b[1] - a[1])) console.log(row(k, n, 0));
@@ -211,6 +238,153 @@ function reportAnchors() {
     );
     console.log(`  tile flags with no sidecar row: ${orphaned.length}${orphaned.length ? ' !!' : ''}\n`);
   }
+}
+
+// ── the coarse landcover layer (SPEC §10.10) ──────────────────────────────────────────
+//
+// This artifact exists for exactly one number, so this is the report that prints it: WHAT
+// ONE ZOOMED-OUT VIEW COSTS TO FETCH. Everything else here — counts, bytes, polygons per
+// kind — is context for that.
+//
+// The number is not "average tile size × number of tiles". A tile's neighbours are like it
+// (cities are next to cities, forest is next to forest), so the view a player actually pays
+// for is a WINDOW sum, and the distribution of window sums is far more skewed than the
+// distribution of tiles. So: build a byte raster per cell for both fidelities, prefix-sum
+// it, and slide the app's own request window — `tileCellsAroundCell`, reproduced here
+// including its cos(lat)-at-the-CELL-CENTRE rule — over every cell that has a v5 tile. The
+// p50 is what a typical view costs and the max is what the worst place in the slice costs;
+// the max is the one that has to fit in a 128 MiB cache.
+/** The app's request set size for `radiusM`, at the latitude of row `i`. Mirrors
+ *  `@lithsec/audio_modules/tiles`' `tileCellsAroundCell` exactly — cos(lat) is taken at the
+ *  CELL CENTRE there, and taking it anywhere else here would report a window the client
+ *  never asks for. */
+function windowRadii(i, radiusM) {
+  const cellLatM = TILE_DEG * M_PER_DEG_LAT;
+  const centreLat = (i + 0.5) * TILE_DEG;
+  const cellLngM = cellLatM * (Math.cos((centreLat * Math.PI) / 180) || 1);
+  return [
+    Math.max(1, Math.ceil(radiusM / cellLatM)),
+    Math.max(1, Math.ceil(radiusM / Math.max(1, cellLngM))),
+  ];
+}
+
+/** Window sums over a sparse `i:j -> bytes` map, evaluated at every cell in `at`. Returns
+ *  the sums sorted ascending so percentiles are an index. O(cells) after the prefix sum,
+ *  which matters: the naive form is O(cells × window) and a 5 km window is 165 cells. */
+function windowSums(bytes, at, radiusM) {
+  let iLo = Infinity, iHi = -Infinity, jLo = Infinity, jHi = -Infinity;
+  for (const k of at) {
+    const c = k.indexOf(':');
+    const i = Number(k.slice(0, c)), j = Number(k.slice(c + 1));
+    if (i < iLo) iLo = i;
+    if (i > iHi) iHi = i;
+    if (j < jLo) jLo = j;
+    if (j > jHi) jHi = j;
+  }
+  if (!Number.isFinite(iLo)) return [];
+  // Pad by the widest window so a cell at the slice edge sums a real rectangle rather than
+  // a clipped one — a border cell's view genuinely does reach into the neighbouring slice,
+  // and counting zero there would flatter the p95.
+  const [riMax, rjMax] = windowRadii(iHi, radiusM);
+  const [ri2, rj2] = windowRadii(iLo, radiusM);
+  const padI = Math.max(riMax, ri2) + 1;
+  const padJ = Math.max(rjMax, rj2) + 1;
+  const rows = iHi - iLo + 1 + 2 * padI;
+  const cols = jHi - jLo + 1 + 2 * padJ;
+  // Prefix sum, (rows+1) × (cols+1). Float64 because a dense metro window is ~10^8 bytes
+  // and the running total over a state is ~10^9 — inside float64's exact-integer range.
+  const ps = new Float64Array((rows + 1) * (cols + 1));
+  for (const [k, b] of bytes) {
+    const c = k.indexOf(':');
+    const r = Number(k.slice(0, c)) - iLo + padI;
+    const q = Number(k.slice(c + 1)) - jLo + padJ;
+    if (r < 0 || r >= rows || q < 0 || q >= cols) continue;
+    ps[(r + 1) * (cols + 1) + (q + 1)] += b;
+  }
+  for (let r = 1; r <= rows; r++)
+    for (let q = 1; q <= cols; q++)
+      ps[r * (cols + 1) + q] +=
+        ps[(r - 1) * (cols + 1) + q] + ps[r * (cols + 1) + q - 1] - ps[(r - 1) * (cols + 1) + q - 1];
+  const sum = (r0, q0, r1, q1) =>
+    ps[(r1 + 1) * (cols + 1) + q1 + 1] -
+    ps[r0 * (cols + 1) + q1 + 1] -
+    ps[(r1 + 1) * (cols + 1) + q0] +
+    ps[r0 * (cols + 1) + q0];
+  const out = [];
+  for (const k of at) {
+    const c = k.indexOf(':');
+    const i = Number(k.slice(0, c)), j = Number(k.slice(c + 1));
+    const [ri, rj] = windowRadii(i, radiusM);
+    const r = i - iLo + padI;
+    const q = j - jLo + padJ;
+    out.push(sum(Math.max(0, r - ri), Math.max(0, q - rj), Math.min(rows - 1, r + ri), Math.min(cols - 1, q + rj)));
+  }
+  out.sort((a, b) => a - b);
+  return out;
+}
+
+function reportCoarse() {
+  const v5c = path.join(outDir, 'v5c');
+  if (!existsSync(v5c)) {
+    console.log('── coarse landcover (v5c) ──\n  no v5c/ in this out dir (the tiler predates §10.10)\n');
+    return;
+  }
+  const cBytes = new Map();
+  let cPolys = 0;
+  let cPoints = 0;
+  const cKinds = new Map();
+  for (const f of tiles(v5c)) {
+    const k = cellKeyOf(v5c, f);
+    if (!k) continue;
+    cBytes.set(k, statSync(f).size);
+    const d = JSON.parse(gunzipSync(readFileSync(f)).toString('utf8'));
+    for (const lc of d.landcover ?? []) {
+      cPolys++;
+      cKinds.set(lc.kind, (cKinds.get(lc.kind) ?? 0) + 1);
+      // Rings are FLAT [lat, lng, …] arrays — two numbers per point (§10.10).
+      for (const r of lc.rings) cPoints += r.length / 2;
+    }
+  }
+  const cTotal = [...cBytes.values()].reduce((a, b) => a + b, 0);
+  const vTotal = [...v5Bytes.values()].reduce((a, b) => a + b, 0);
+  // km² of ground the coarse tiles cover, at each row's own cos(lat). A cell is exactly
+  // 0.01° square; nothing here needs the slice polygon, and using the cell grid keeps this
+  // number comparable between a state and a city.
+  let km2 = 0;
+  for (const k of cBytes.keys()) {
+    const i = Number(k.slice(0, k.indexOf(':')));
+    const lat = (i + 0.5) * TILE_DEG;
+    km2 += ((TILE_DEG * M_PER_DEG_LAT) ** 2 * Math.cos((lat * Math.PI) / 180)) / 1e6;
+  }
+
+  console.log('── coarse landcover (v5c, SPEC §10.10) ──');
+  console.log(`  ${cBytes.size} coarse tiles, ${cTotal.toLocaleString()} B gz ` +
+    `(${(cBytes.size ? cTotal / cBytes.size : 0).toFixed(0)} B each)`);
+  console.log(`  ${cPolys.toLocaleString()} clipped polygons, ${Math.round(cPoints).toLocaleString()} points`);
+  console.log(`  ${(cTotal / Math.max(1, km2)).toFixed(0)} B per km² over ${Math.round(km2).toLocaleString()} km²`);
+  console.log(`  ${((100 * cTotal) / Math.max(1, vTotal)).toFixed(2)}% of the ${mb(vTotal)} the v5 tiles weigh`);
+  console.log('');
+  for (const [k, n] of [...cKinds].sort((a, b) => b[1] - a[1])) console.log(row(k, n, cPolys));
+
+  // THE NUMBER. Both fidelities, the same window, over every cell a player could stand in.
+  // 2,000 m is a mid-zoom look; 5,200 m is the app's own `COARSE_RADIUS_M` — the
+  // half-diagonal of the widest page `MAP_SPAN_MAX_M` can draw, so it is exactly the set the
+  // client asks for and exactly the set the full tiles would have had to serve instead.
+  const stand = [...v5Bytes.keys()];
+  for (const R of [2000, 5200]) {
+    const [ri, rj] = windowRadii(Number(stand[0]?.slice(0, stand[0].indexOf(':')) ?? 0), R);
+    const v = windowSums(v5Bytes, stand, R);
+    const c = windowSums(cBytes, stand, R);
+    console.log(`\n  ── one view at radius ${R} m: ~${(2 * ri + 1) * (2 * rj + 1)} cells ` +
+      `(${2 * ri + 1} x ${2 * rj + 1} at the southern edge) ──`);
+    console.log(`    ${'v5  full tiles'.padEnd(18)} p50 ${mb(at(v, 0.5)).padStart(9)}  p95 ${mb(at(v, 0.95)).padStart(9)}  max ${mb(at(v, 1)).padStart(9)}`);
+    console.log(`    ${'v5c coarse'.padEnd(18)} p50 ${kb(at(c, 0.5)).padStart(9)}  p95 ${kb(at(c, 0.95)).padStart(9)}  max ${kb(at(c, 1)).padStart(9)}`);
+    const ratio = (p) => (at(c, p) > 0 ? `${Math.round(at(v, p) / at(c, p))}x` : '—');
+    console.log(`    ${'cheaper by'.padEnd(18)} p50 ${ratio(0.5).padStart(9)}  p95 ${ratio(0.95).padStart(9)}  max ${ratio(1).padStart(9)}`);
+    console.log(`    the 128 MiB cache holds ${(134217728 / Math.max(1, at(v, 1))).toFixed(1)} such views at v5, ` +
+      `${Math.round(134217728 / Math.max(1, at(c, 1))).toLocaleString()} at v5c`);
+  }
+  console.log('');
 }
 
 // ── habitat atlas (SPEC §10.7) ────────────────────────────────────────────────────────

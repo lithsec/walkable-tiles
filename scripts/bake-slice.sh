@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Bake one Geofabrik slice into v4 + v5 tiles and push only the changed ones to R2.
 #   download .osm.pbf -> osmium tags-filter -> osmium export -> tile.mjs -> diff -> upload
-# One pass writes both formats: v4 (unchanged, Cologra) and v5 (v4 + landcover/
-# landmarks/habitat for Ausculta — SPEC.md §10), plus the habitat sidecar jsonl.
+# One pass writes three formats: v4 (unchanged, Cologra), v5 (v4 + landcover/
+# landmarks/habitat for Ausculta — SPEC.md §10), and v5c (the COARSE landcover layer,
+# shape only, for the zoomed-out map — SPEC.md §10.10), plus the habitat sidecar jsonl.
 #
 # Usage: bake-slice.sh <geofabrik-pbf-url> <slice-name>
 # Env:
@@ -56,8 +57,8 @@ echo "[$NAME] === bake start ==="
 # tile dirs, because a half-written OUT_DIR has tiles but no manifest to diff against.
 UPLOAD_ONLY="${R2_UPLOAD_ONLY:-0}"
 if [ "$UPLOAD_ONLY" = "1" ]; then
-  [ -f "$OUT/hashes.json" ] && [ -f "$OUT/hashes-v5.json" ] || {
-    echo "[$NAME] R2_UPLOAD_ONLY=1 but $OUT/hashes{,-v5}.json missing" >&2; exit 1; }
+  [ -f "$OUT/hashes.json" ] && [ -f "$OUT/hashes-v5.json" ] && [ -f "$OUT/hashes-v5c.json" ] || {
+    echo "[$NAME] R2_UPLOAD_ONLY=1 but $OUT/hashes{,-v5,-v5c}.json missing" >&2; exit 1; }
   echo "[$NAME] R2_UPLOAD_ONLY=1 — reusing tiles in $OUT, skipping download/filter/tile"
 fi
 
@@ -128,12 +129,16 @@ BYTES=${BYTES:-0}
 TILES5=$(find "$OUT/v5" -name '*.json.gz' 2>/dev/null | wc -l | tr -d ' ')
 BYTES5=$(find "$OUT/v5" -type f -name '*.json.gz' -print0 2>/dev/null | xargs -0 cat 2>/dev/null | wc -c | tr -d ' ')
 BYTES5=${BYTES5:-0}
-echo "[$NAME] built $TILES v4 tiles ($BYTES bytes), $TILES5 v5 tiles ($BYTES5 bytes)"
+TILESC=$(find "$OUT/v5c" -name '*.json.gz' 2>/dev/null | wc -l | tr -d ' ')
+BYTESC=$(find "$OUT/v5c" -type f -name '*.json.gz' -print0 2>/dev/null | xargs -0 cat 2>/dev/null | wc -c | tr -d ' ')
+BYTESC=${BYTESC:-0}
+echo "[$NAME] built $TILES v4 tiles ($BYTES bytes), $TILES5 v5 tiles ($BYTES5 bytes), $TILESC v5c coarse tiles ($BYTESC bytes)"
 
 if [ "$DRY" = "1" ]; then
-  echo "[$NAME] R2_DRY_RUN=1 — skipping upload; tiles in $OUT/v4 + $OUT/v5"
+  echo "[$NAME] R2_DRY_RUN=1 — skipping upload; tiles in $OUT/v4 + $OUT/v5 + $OUT/v5c"
   cp "$OUT/hashes.json" "./hashes-$NAME.json"
   cp "$OUT/hashes-v5.json" "./hashes-v5-$NAME.json"
+  cp "$OUT/hashes-v5c.json" "./hashes-v5c-$NAME.json"
   echo "[$NAME] === bake done (dry) ==="
   exit 0
 fi
@@ -252,6 +257,12 @@ else
   V4_CHANGED=$CHANGED V4_REMOVED=$REMOVED
 fi
 upload_version v5 "$OUT/hashes-v5.json"
+# The COARSE layer (SPEC §10.10). Diff-gated like the others and on the same cell grid, so
+# the same key_to_path and the same hash manifest machinery apply with nothing new. It is
+# ~0.2% of v5's bytes and lands in the same Class-A write class, so a slice that re-bakes v5
+# should always re-bake this beside it: a coarse tile whose v5 tile moved is a map whose
+# zoomed-out view disagrees with its zoomed-in one.
+upload_version v5c "$OUT/hashes-v5c.json"
 
 # Habitat sidecar for the game server (small; re-upload every bake, no diff).
 aws s3 cp "$OUT/habitat-$NAME.jsonl" "s3://$R2_BUCKET/v5/habitat/$NAME.jsonl" \

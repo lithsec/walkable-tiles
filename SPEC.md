@@ -1119,3 +1119,181 @@ slice repeatedly and would otherwise re-download hundreds of megabytes each time
 GitHub runner the cache is cold every run; the download is inside the existing 120-minute
 timeout and costs nothing, and a state's DEM is a fraction of the ~1.1 GB Geofabrik extract
 it is baking beside.
+
+### 10.10 `v5c` — the COARSE landcover layer, for the 600 m → 10 km band
+
+A fourth artifact, at its own prefix `v5c/<latIdx>/<lngIdx>.json.gz`, with its own hash
+manifest `v5c/hashes/<slice>.json` (locally `out/hashes-v5c.json`). **Additive in the
+strongest possible sense:** it is a separate object at a separate path, so a client that
+predates it never asks for it and the v5 tiles do not change shape by one byte.
+
+#### The measurement that forces it
+
+A v5 tile is ~890 KB in a city — 891 KB downtown Salt Lake City, 911 KB Boston, measured on
+the live CDN. Ausculta's tile cache is **128 MiB total**, and its request set is a symmetric
+block around the caller's cell (never a box around their position — that is the anonymity
+property, and it costs cells). So:
+
+| map radius | cells requested | v5 bytes |
+|---|---|---|
+| 0.6 km (gameplay) | ~9 | ~8 MB |
+| 2 km | ~35 | ~31 MB |
+| 5 km | ~165 | ~145 MB |
+
+A 5 km view is **more than the entire cache**, fetched in one pinch, evicting every street
+the player has walked. Raising the live radius cannot deliver the zoomed-out map; it can
+only break the near one. And the habitat atlas (§10.7) does not fill the gap either — 693 B
+for all of Vermont, but its blocks are 8 × 11 km, which is one or two pixels at this zoom.
+**Nothing served the band between 600 m and 10 km.**
+
+#### What it carries, and what it refuses
+
+```jsonc
+{ "v": 1,
+  "landcover": [ { "kind": "water", "rings": [ [ 44.51234, -72.81431, 44.51301, … ], … ] }, … ] }
+```
+
+`kind` is §10.1's vocabulary unchanged (`water`, `wood`, `green`, `field`). `rings[0]` is
+the outer ring and the rest are holes; rings are **open** and rendered even-odd, exactly as
+in §10.1. Entries are ordered by clipped area descending, so big washes paint first at
+either fidelity.
+
+**Rings are FLAT `[lat, lng, lat, lng, …]` number arrays**, not §10.1's `{lat,lng}` objects.
+v5 uses objects because its ways inherited them from v4 and the client passes them through
+by reference on a hot path; this artifact has no such lineage, and a payload that is almost
+entirely coordinates is ~2× smaller flat before gzip. The client converts once, at parse.
+
+Nothing else is in it, and each refusal has its own reason:
+
+- **No ways, names or crossings.** This is where the entire saving comes from. Measured on
+  live tiles, downtown SLC is 880,063 B at v4 and 890,931 B at v5 — the terrain is 1.2% of
+  the payload and ways are essentially all of the rest. At a 5 km view a residential street
+  is a hair thinner than a stroke, and 165 tiles of them is 145 MB of hair.
+- **No habitat grid.** It is already published twice: per spawn cell in the tiles (§10.3)
+  and per 8 × 11 km block in the atlas (§10.7). A third copy at a third resolution is a
+  third thing to keep in step.
+- **No landmarks.** A label needs a name, and a name at 5 km needs a *significance* ranking
+  over a region, which is §10.8's question and §10.8's artifact. Shipping the tile's
+  six-per-cell list at this zoom would put every municipal park on a state-sized page.
+
+`v: 1` is this artifact's own version and deliberately **not 5**. Giving it the tile version
+would promise that a v5 parser can read it. It cannot, and should never try.
+
+#### Granularity: one artifact per v5 tile, and why not per block
+
+The obvious economy is a block of 4 × 4 or 16 × 16 tiles, which would cut a 5 km view from
+~165 round trips to ~25 or ~9. **It is rejected on §4.**
+
+Ownership is per cell CENTRE, so a coarser block is written by whichever slice holds its
+centre — and that slice bakes it from a Geofabrik extract that carries its neighbour's
+geometry only as far as the extract's own buffer reaches (a feature is complete if any node
+is inside the `.poly`; a forest wholly 3 km over the line is simply absent). A 0.16° block
+whose centre lands just inside Vermont therefore has to supply up to 17 km of New Hampshire
+it does not have, and the result is a blank ribbon up to one block wide along **every** slice
+boundary — at exactly the zoom this artifact exists for. On the 0.01° grid that ribbon is the
+1.1 km the v5 tiles already accept and which no zoom in this app can see.
+
+The trade is worth naming precisely: **the stated problem is BYTES, not round trips.** A
+128 MiB cache against a 145 MB fetch is a wall; ~165 small requests is a second of latency on
+a foreground gesture, and the client already asks for that many cells at that radius today.
+Staying on the tile grid also means the coarse layer inherits `tileCellsAroundCell`, the
+sorted-neighbour-ring request discipline, `tileCellKey`, the 30-day/5-minute TTL split and
+the eviction policy **verbatim** — no second grid, and no second privacy argument. A new
+grid would need one: the request-ordering side channel `apps/mobile/src/tiles/cache.ts`'s
+header documents is not a property of the tile size, it is a property of the request set.
+
+#### Clipped to the CELL RECT, not to the ±1200 m box
+
+v5 clips landcover to the ±`BOX_HALF_M` box around the cell centre and the client dedupes the
+seam copies. At this fidelity that would be ~9× the bytes for the same ground, since ~165
+overlapping 2.4 km boxes cover each square metre nine times.
+
+So a coarse tile is clipped to its cell's **exact 0.01° rectangle**, padded by
+`COARSE_CLIP_PAD_M` = **40 m**. The coarse tiles are then a PARTITION: every polygon appears
+in exactly the cells it covers, adjacent pieces abut, the union is seamless, **and the client
+needs no seam dedupe at all**. The 40 m pad exists because two exactly-abutting fills leave
+an antialiasing hairline; the renderer composites each class's polygons under one group
+opacity, so a slight overlap unions away invisibly — the same property that already lets v5's
+seam duplicates paint without double-darkening.
+
+#### Simplification (values normative)
+
+| constant | value | |
+|---|---|---|
+| `COARSE_SIMPLIFY_TOL_M` | **50 m** | Douglas-Peucker, applied to §10.1's already-10 m-simplified rings |
+| `COARSE_MIN_AREA_M2` | **50,000 m²** | drop before clipping — on the *simplified* ring |
+| `COARSE_MIN_CLIPPED_M2` | **25,000 m²** | post-clip sliver floor, the same 2:1 ratio §10.1 uses |
+| `COARSE_CLIP_PAD_M` | **40 m** | |
+| coordinate rounding | **1e-5°** (~1.1 m) | |
+
+The thresholds are read off the DRAWN SIZE, not off the data. At the ~5 km span this layer is
+for, a full-width phone panel is ~390 SVG units, so one unit is ~12.8 m. A 50,000 m² blob is
+a 224 m square — **17.5 units**, the smallest thing that reads as a shape rather than a speck;
+below it the page is dots, and a page of dots is noise. 50 m of simplification is ~4 units,
+about the width of a watercolor edge.
+
+**Re-simplifying an already-simplified ring is not the same as simplifying the original at
+50 m** — the deviations compose, so a coarse ring is within 60 m of the OSM geometry rather
+than 50. At under five drawn units that is accepted; paying a second full pass over the raw
+rings to recover 10 m would double the tiler's landcover cost for something nobody can see.
+
+1e-5° is 45× finer than the simplification tolerance and well inside the clip pad, so it
+cannot open a seam, and it is one character per coordinate cheaper than §10.1's 1e-6. A tenth
+of a metre on a shape that is honestly ±60 m is a precision this artifact does not have.
+
+**What was deliberately NOT done: polygon union.** Two adjacent woods stay two polygons; a
+lake clipped across four cells stays four pieces. Unioning them is a real geometry-library
+problem, it would break the partition property that makes the dedupe unnecessary, and under
+group-opacity compositing the drawn result is identical.
+
+#### Measured, `--trial`, nothing uploaded (2026-07-30)
+
+| slice | v5c tiles | v5c bytes (gz) | B / tile | B / km² | vs v5 total |
+|---|---|---|---|---|---|
+| district-of-columbia | 135 | **28,785** | 213 | 221 | **0.19%** of 14.5 MB |
+| vermont | 18,486 | **3,179,256** | 172 | 193 | **2.18%** of 139.4 MB |
+
+The whole District's coarse layer is **28.8 KB** — less than one third of one v5 tile.
+
+The number that justifies the artifact is not the total, though: it is what ONE VIEW costs.
+That is a WINDOW sum over the byte raster and is far more skewed than the per-tile
+distribution, because cities sit next to cities and forest next to forest.
+`inspect-bake.mjs` reports it — it reproduces `tileCellsAroundCell` including its
+cos(lat)-at-the-cell-centre rule, prefix-sums both byte rasters, and slides the window over
+every cell that has a v5 tile. At the app's own `COARSE_RADIUS_M` (5,200 m, the
+half-diagonal of the widest page it can draw):
+
+| slice | cells | v5 p50 / p95 / max | v5c p50 / p95 / max | cheaper by |
+|---|---|---|---|---|
+| district-of-columbia | 143 | 7.9 / 11.5 / **11.9 MB** | 13.0 / 18.4 / **19.8 KB** | 615–640× |
+| vermont | 165 | 0.7 / 1.5 / **5.0 MB** | 17.9 / 34.1 / **55.9 KB** | 38–92× |
+
+**Neither trial slice contains a ~890 KB tile** — the District's are ~81 KB and Vermont's
+~5 KB, because a Geofabrik state extract of a small or rural region is nothing like downtown
+Salt Lake City. Against the live-CDN measurement that opened this section, the same 165-cell
+window of city tiles is **~145 MB**, and the worst coarse window measured anywhere across
+both slices is **55.9 KB**. The 128 MiB cache holds 10.7 such views at v5 and 2,346–6,606 at
+v5c.
+
+**What the area gate costs, in ground rather than in polygons.** The 50,000 m² threshold
+discards most polygons and almost no landcover, which is the shape a size gate is supposed
+to have — and it is reported as area for exactly that reason, because the count reads like a
+massacre and says nothing:
+
+| slice | polygons kept | landcover AREA kept |
+|---|---|---|
+| vermont | 4,967 of 18,604 (26.7%) | **98.5%** |
+| district-of-columbia | 186 of 1,664 (11.2%) | **78.8%** |
+
+The District is the honest cost of the threshold and it is a city's cost: its park p90 is
+64,602 m², so most of what it loses is squares and traffic circles, each a speck at this
+zoom. What survives is the Mall, Rock Creek, the Anacostia and the Potomac — which is what a
+5 km page of Washington should say.
+
+#### Ownership, hashing, upload
+
+Identical to v5 and unchanged: a slice writes cell `(i, j)` iff the cell centre is inside its
+poly (§4); the hash is sha256 of the uncompressed JSON; `bake-slice.sh` diffs against the
+published `v5c/hashes/<slice>.json` and uploads only what moved. **A slice that re-bakes v5
+must re-bake this beside it** — a coarse tile whose v5 tile moved is a map whose zoomed-out
+view disagrees with its zoomed-in one — and it costs ~0.2% of v5's bytes to do so.
