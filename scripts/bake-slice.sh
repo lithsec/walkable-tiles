@@ -12,6 +12,10 @@
 #                                Resumes a bake whose tiling succeeded and whose upload
 #                                did not — the failure mode this pipeline actually hit.
 #   R2_CONCURRENCY=<n>           in-flight R2 requests per aws process (default 128)
+#   R2_SKIP_V4=1                 publish v5 only, leaving already-live v4 untouched. For a
+#                                terrain backfill of a state that already has v4: halves the
+#                                writes, and does not disturb Cologra's format. See the note
+#                                at the upload call.
 #   R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET   (required unless dry run)
 set -euo pipefail
 
@@ -192,8 +196,29 @@ upload_version() {
     --content-type application/json --only-show-errors
 }
 
-upload_version v4 "$OUT/hashes.json"
-V4_CHANGED=$CHANGED V4_REMOVED=$REMOVED
+# ── PUBLISHING v4 IS OPTIONAL, AND SKIPPING IT IS THE CHEAP PATH FOR A TERRAIN BACKFILL ──
+#
+# v5 is v4 plus landcover/landmarks, and it DUPLICATES v4 wholesale to do it — measured on
+# live tiles: downtown SLC v4 880,063 B vs v5 890,931 B, so the terrain is 1.2% of the
+# payload and the other 98.8% is the same ways, names and crossings twice over.
+#
+# So when a state already HAS live v4 and the point of the run is to backfill v5 (arizona,
+# florida, kansas — the Ausculta terrain gap), publishing v4 again is half the Class-A
+# writes for no new capability: 560,723 objects across those three, about $2.50.
+#
+# It is also the SAFER default in that situation, which is the better argument. v4 is
+# Cologra's format and Cologra is shipping; refreshing its tiles as a side effect of an
+# Ausculta terrain bake changes a live app's data for reasons that have nothing to do with
+# that app. `R2_SKIP_V4=1` keeps the running system still and touches only what was asked
+# for. Leave it OFF for a genuine refresh, where re-baking v4 from a newer extract IS the
+# point.
+if [ "${R2_SKIP_V4:-0}" = 1 ]; then
+  echo "[$NAME] R2_SKIP_V4=1 — leaving v4 as published, uploading v5 only"
+  V4_CHANGED=0 V4_REMOVED=0
+else
+  upload_version v4 "$OUT/hashes.json"
+  V4_CHANGED=$CHANGED V4_REMOVED=$REMOVED
+fi
 upload_version v5 "$OUT/hashes-v5.json"
 
 # Habitat sidecar for the game server (small; re-upload every bake, no diff).
