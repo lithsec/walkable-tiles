@@ -1142,9 +1142,13 @@ fixed hillside slope a summit standing *h* metres above its own ground has a foo
 entirely and only a reference height survives:
 
 > `drop(peak)` = elevation of the GLO-30 post nearest the node, minus the LOWEST post
-> within `PEAK_RELIEF_R_M` = **2,000 m** of it, over the disc of §10.4's window rule at
+> within `PEAK_RELIEF_R_M` = **8,000 m** of it, over the disc of §10.4's window rule at
 > post spacing (§10.9). `sig(peak) = 2 · log2(drop / PEAK_RELIEF_REF_M)`,
-> `PEAK_RELIEF_REF_M = 60`. A peak whose own post has no DEM coverage has no `drop` and
+> `PEAK_RELIEF_REF_M = 95`. (Both were 2,000 m / 60 m before 2026-07-31. A 2 km disc is
+> narrower than a large massif, so it measured the massif's shoulder rather than the
+> mountain: Cascade Mountain outscored Mount Timpanogos, and Kings Peak — Utah's highest —
+> scored below every other major summit in the state. The reference moved with the radius so
+> that peaks did not shift against the area kinds; see the derivation at the constant.) A peak whose own post has no DEM coverage has no `drop` and
 > scores `−Infinity`, which is below `ANCHOR_SIG_MIN` — abstention, not a guess.
 
 **Revision 3 changed this line, and revision 2 predicted it would.** It used to read `ele`,

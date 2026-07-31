@@ -194,20 +194,53 @@ const LANDMARK_SIG_REF_M2 = {
 //
 // At 1 km Mansfield loses its own anchor cell twice over; at 1.5 km it loses to Adams Apple
 // by five metres; at 2 km it leads Vermont outright and every named sub-summit of Mansfield,
-// Killington and Equinox falls behind its parent. Going wider is not free — at 3 km Mt
-// Ascutney falls behind Ascutney North, because the window stops being local at all.
+// Killington and Equinox falls behind its parent.
 //
-// REF = 60 m, the same construction the retired `ele`/105 m reference used, on a quantity
-// that means something. The District's 17 named summits run 38–103 m of drop over a 2 km
-// disc with a MEDIAN of 60, so its own hills score around zero. Below that is the surface
-// model's own noise: Vermont's flattest named "hills" — Stanhope Hill, The Hurricane,
-// Upper Diggings — measure 24–36 m, which is a name attached to a road bend. Point Reno,
-// which is genuinely the District's high point, measures 84 m and scores +0.97 where `ele`
-// gave it +0.46. And the scale is preserved (Mansfield 7.6 against 7.4; Vermont's median
-// summit 4.2 against ~4.5), so the AREA references below — read off the same trial
-// distributions and balanced against the old peak scores — still hold.
-const PEAK_RELIEF_R_M = 2000;
-const PEAK_RELIEF_REF_M = 60;
+// ── R WENT 2000 -> 8000 BECAUSE 2 km WAS CALIBRATED ON VERMONT (2026-07-31) ────────────
+//
+// Vermont's mountains are ~1,300 m and sit on ridges a couple of kilometres wide, so a 2 km
+// disc contains a Vermont summit AND its own ground. The Wasatch and the Uintas do not fit
+// in it, and a window narrower than the massif measures the massif's shoulder rather than
+// the mountain. Measured drop, in metres:
+//
+//                           r=2000   r=4000   r=8000   r=16000
+//   Mount Timpanogos          1063     1614     2094      2138
+//   Cascade Mountain          1316     1778     1884      1931
+//   Mount Nebo                1195     1770     2118      2237
+//   Lone Peak                  808     1347     1665      1740
+//   Kings Peak (UT high pt)    688      844     1057      1424
+//   Mount Mansfield (VT)       832     1036     1163      1200
+//
+// At 2 km, CASCADE MOUNTAIN OUTSCORES MOUNT TIMPANOGOS and takes their shared 0.5° anchor
+// cell, which is how this was found: `verify-coverage`'s Timpanogos probe. Worse and more
+// systematic, Kings Peak — the highest point in Utah — scored LOWEST of every peak in that
+// table, and the shipped utah bake anchored Whiskey Knoll, Cobble Hill and Bald Knoll while
+// the entire Uinta range, Timpanogos and Lone Peak got nothing. An isolated butte on a plain
+// has a large 2 km drop; a 4,000 m summit in the middle of a high range does not.
+//
+// 8 km is where the pair inverts and stays inverted (Timpanogos passes Cascade between 4 and
+// 8 km and leads by 210 m there). 16 km buys little and stops being local.
+//
+// WHAT THIS STILL DOES NOT FIX, said plainly: Kings Peak is last at EVERY radius on that
+// ladder, because it stands on a plateau that holds above 3,600 m for tens of kilometres —
+// its independence is TRUE prominence, whose key col is far outside any local window. Drop at a
+// radius cannot see that. Utah's anchors will be Nebo, Timpanogos, Cascade and Peale rather
+// than its literal high point, and that is a better roster for walking to than the old one
+// but it is not the correct one. True prominence needs a watershed pass over the DEM.
+//
+// REF = 95 m, and it is DERIVED rather than re-guessed. The old 60 m was the District's
+// median summit drop at 2 km, which put Point Reno — genuinely the District's high point —
+// at +0.97 and the median hill at 0. Point Reno measures 84 m at 2 km (the value this
+// comment recorded before the change, reproduced exactly) and 133 m at 8 km, a ratio of
+// 1.58; 60 × 1.58 = 95, and 2·log2(133/95) = +0.97. So the calibration point keeps its
+// score to two decimal places and the District's median hill still sits at zero.
+//
+// That is the property that keeps the blast radius small: because the reference moved with
+// the measure, PEAKS DID NOT MOVE RELATIVE TO THE AREA KINDS. Mansfield goes 7.60 -> 7.23,
+// Timpanogos 8.29 -> 8.92. The AREA references below, balanced against the old peak scores,
+// still hold, and ANCHOR_SIG_MIN still means what it meant.
+const PEAK_RELIEF_R_M = 8000;
+const PEAK_RELIEF_REF_M = 95;
 // `boundary=national_park` is an ADMINISTRATIVE tag, not a claim about scale, and in the US
 // the National Park Service puts it on everything it operates. Measured in the District:
 // all 37 features the old rule promoted carry it, and they are Dupont Circle (9,000 m²),
