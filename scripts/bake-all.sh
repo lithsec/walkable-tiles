@@ -28,11 +28,31 @@ command -v osmium >/dev/null || { echo "need osmium-tool"; exit 1; }
 TOTAL=$(jq length "$SLICES")
 echo "baking $TOTAL slices from $SLICES — $JOBS parallel, state in $STATE"
 
+# ── KEEP THE TILES. THE BAKE IS THE EXPENSIVE PART; PUBLISHING IS NOT ────────────────
+#
+# `bake-slice.sh` defaults OUT_DIR to a directory under `mktemp -d`, which is deleted when
+# the slice finishes. That is right for a one-shot publish and wrong for everything else,
+# because it throws away the ONLY expensive artifact: a full re-bake is 6-10 hours of
+# download, osmium, tiling and DEM sampling, while the upload that follows is about two of
+# those hours and is the only part that cares what format the tiles are published in.
+#
+# Retaining the output makes the publish step REPEATABLE at zero bake cost — `R2_UPLOAD_ONLY=1`
+# already republishes an existing OUT_DIR without re-tiling. That is what lets the packaging
+# decision (one object per cell, or a single archive per slice) be made or REVISITED after
+# the bake rather than before it, and it is the difference between changing your mind costing
+# a command and costing another overnight run.
+#
+# Set BAKE_OUT=/some/path to put them elsewhere. Budget roughly the published size: the five
+# live slices are on the order of 5 GB across v4, v5 and v5c.
+BAKE_OUT="${BAKE_OUT:-$PWD/out-bake}"
+mkdir -p "$BAKE_OUT"
+echo "keeping tiles in $BAKE_OUT (publish is repeatable from here; see R2_UPLOAD_ONLY)"
+
 bake_one() {
   name="$1"; url="$2"
   if [ -f "$STATE/$name.done" ]; then echo "skip  $name (already done)"; return 0; fi
   echo ">>>   $name"
-  if "$DIR/bake-slice.sh" "$url" "$name" >"$STATE/$name.log" 2>&1; then
+  if OUT_DIR="$BAKE_OUT/$name" "$DIR/bake-slice.sh" "$url" "$name" >"$STATE/$name.log" 2>&1; then
     touch "$STATE/$name.done"
     echo "ok    $name"
   else

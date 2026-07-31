@@ -15,3 +15,4 @@ out-trial/
 # untracked it is one `git add -A` away from being committed.
 out-trial-*/
 out/
+out-bake/
