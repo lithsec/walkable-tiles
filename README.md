@@ -63,30 +63,48 @@ a way near a boundary lands in ~4 neighboring tiles — accepted duplication
 
 ## R2 layout
 
+**Tiles are published as ARCHIVES, not as one object per cell** (SPEC.md §11, as of
+2026-07-31). A slice is one `.wta` file per version; a tile is an HTTP byte range inside it.
+
 ```
 walkable-tiles/
-  v4/build/<slice>.json      # per-slice last-baked timestamp, tile/changed counts, bytes (v4 + v5)
-  v4/hashes/<slice>.json     # content hash per tile from the last build (diff input)
-  v4/<latIdx>/<lngIdx>.json.gz   # one gzip-compressed v4 payload per data-bearing cell
-  v5/hashes/<slice>.json     # same diff manifest, v5 tiles
+  v4/build/<slice>.json           # per-slice last-baked stamp, counts, bytes, PHASE TIMINGS
+  v4/hashes/<slice>.json          # content hash per tile — still published, no longer a gate
+  v4/archive/index.json           # every published v4 slice: bbox, coverage bitmap, digest
+  v4/archive/<slice>.idx.json     # one slice's entry (index.json is rebuilt from these)
+  v4/archive/<slice>-<sha12>.wta  # the archive; content-addressed, immutable
+  v5/hashes/<slice>.json
+  v5/archive/…                    # same three, v5
+  v5c/archive/…                   # same three, v5c (the coarse layer, SPEC.md §10.10)
   v5/habitat/<slice>.jsonl   # habitat sidecar — non-rural spawn cells (SPEC.md §10.4)
   v5/landmarks/<slice>.jsonl # anchor sidecar — the few named things significant enough to
                              #   hold a creature, after the regional cap (SPEC.md §10.8).
                              #   Tens per state: vermont 12, district-of-columbia 1.
-  v5/<latIdx>/<lngIdx>.json.gz   # v5 payload; v5-only cells exist (landcover with no ways)
+  v5/atlas/<slice>.json      # habitat atlas for the client (SPEC.md §10.7)
 ```
 
-- Served at `${TILES_HOST}/v4/<latIdx>/<lngIdx>.json.gz`, where `TILES_HOST` is the
-  Cloudflare custom domain in front of R2 — supplied to the app as a build-time env
-  var, never committed here. (The data is ODbL, so the host is operational config,
-  not a true secret.)
-- `Cache-Control: public, max-age=604800` (7 d). No purge needed — walkable infra
-  barely moves, and the app's on-device cache is 60 d, so freshness is inherently
-  loose (see below). Force freshness by bumping the path prefix (`v5/…`).
-- **404 = no walkable data in that cell** → app treats as empty, optionally falls
-  back to Overpass.
+- Served from `${TILES_HOST}`, the Cloudflare custom domain in front of R2 — supplied to the
+  app as a build-time env var, never committed here. (The data is ODbL, so the host is
+  operational config, not a true secret.)
+- A client fetches `index.json` (1 h TTL), then one **ranged** GET for a slice's directory,
+  then one ranged GET per tile. **Ranged GETs must answer 206**; a 200 means the origin
+  ignored `Range` and is about to hand back the whole archive, and both the client and the
+  verifier refuse it.
+- **Cache-Control:** the `.wta` is `max-age=31536000, immutable` (safe, because its key
+  contains its own digest); `index.json` and the sidecars are `max-age=60`. A republish is a
+  new object plus a new index — atomic, and no purge.
+- **"Empty" and "not baked yet" are now different answers.** A cell inside a slice's
+  coverage bitmap with no directory entry is a **hole** — permanent, cached 30 days. A cell
+  no published slice covers is **unbaked** — transient, cached 5 minutes. That distinction
+  was impossible under one-object-per-cell, where both were a 404; SPEC.md §11.5.
 - Only **data-bearing** cells are written (oceans/empty land skipped), cutting
   ~2 B theoretical cells to ~5–10 M real ones.
+
+Why: a full v5 + v5c re-bake was ~1.2–1.3 M Class-A writes, essentially the entire $6–9 cost
+of a bake. It is now about fifteen objects. Nothing is saved at RUNTIME — a range request is
+the same Class-B read, and the client issues the same number of tile requests it did before.
+See ausculta's `docs/PMTILES-SCOPING.md` for the costing and SPEC.md §11 for the format
+(including why this is not PMTiles v3 byte-for-byte).
 
 ### What is actually published
 
@@ -105,8 +123,9 @@ whatever OSM said the day they were baked.
 | virginia | yes | **no** | **no** |
 | maryland | yes | **no** | **no** |
 
-Everything else 404s, which the client reads as "empty cell" — indistinguishable
-from ocean. **A region with v4 but no v5 renders ways with no landcover wash,
+Everything else is absent from `index.json`, which the client reads as **not baked** —
+distinguishable from ocean since the archive move, and retried on the short clock rather
+than cached as emptiness. **A region with v4 but no v5 renders ways with no landcover wash,
 landmarks, or habitat grid**: Ausculta's terrain layer degrades silently rather
 than erroring, so a missing v5 slice is invisible from inside the app. The only
 proof of coverage is fetching a tile and looking at its contents.
@@ -116,12 +135,15 @@ Washington DC is a hole in an otherwise-covered region: the `virginia` and
 `district-of-columbia` was never baked, so cells over the District have neither
 version.
 
-**Only `massachusetts` and `utah` have `hashes/` manifests.** The other slices'
-tiles were pushed without one, which has two consequences worth knowing before you
-read the table as a completeness claim: their *completeness is unproven* (the
-manifest is the only record of what a bake intended to write, so there is nothing to
-diff the bucket against), and their next bake re-uploads every tile rather than just
-the changed ones, because an absent manifest reads as an empty one.
+**Only `massachusetts` and `utah` have `hashes/` manifests.** The other slices' tiles were
+pushed without one, so their *completeness is unproven* — the manifest is the only per-cell
+record of what a bake intended to write. Since the archive move that is a documentation gap
+rather than an upload cost: a missing manifest no longer means "re-upload every tile",
+because "changed" is now one `sha256` over the whole archive (SPEC.md §11.6).
+
+**Nothing in this table is packed yet.** The archives land with the next publish; until then
+the bucket holds the object layout and the app cannot read it. That is deliberate — nobody
+is using the app, so there is no compatibility layer and there should not be one.
 
 ---
 
@@ -140,10 +162,21 @@ the changed ones, because an absent manifest reads as an empty one.
    regional relief for `mountain` and local drop for the peak ranking
    (`SPEC.md` §10.4, §10.8, §10.9). Cached under `DEM_CACHE_DIR` between bakes;
    cold cost measured at 11.7 MB for the District and 255.2 MB for Vermont.
-5. **Assemble** each owned cell's v4 payload → gzip.
-6. **Diff-gated upload:** hash each tile, compare to `v4/hashes/<slice>.json`;
-   PUT only changed tiles (minimizes R2 Class-A writes), then refresh the hash
-   manifest and the per-slice `build/<slice>.json` stamp.
+5. **Assemble** each owned cell's v4/v5/v5c payload → gzip.
+6. **Pack** (`scripts/pack-archives.mjs`): concatenate the tiles of each version into one
+   `.wta` with a directory and a coverage bitmap (SPEC.md §11). The tile BYTES are not
+   touched, and the packer proves it — it re-opens the archive it just wrote, decodes the
+   directory from the file, pulls every tile back by offset and compares it with the source
+   object. It reads only `OUT_DIR`, so packaging never costs a re-bake.
+7. **Publish:** upload the archive (immutable, content-addressed), then its index sidecar,
+   then rebuild `index.json` from every sidecar in the bucket, then retire the
+   generation-before-last. Skipped entirely if the archive's `sha256` matches the published
+   one — which is what "changed" means now.
+
+**Every phase is timed.** The log prints `⏱ <phase>: <seconds>` and a `TOTAL`, and the
+per-slice `build/<slice>.json` carries a `phases` object. The log used to name the phases
+with no timestamps at all, which made a 6–10 hour run unattributable — fine for one state,
+useless for planning a globe.
 
 The osmium steps stream (low memory); tiles flush per-cell, so any Geofabrik
 country/state extract fits a free runner's disk. Step 4 is the one pass that
@@ -159,7 +192,9 @@ slice's bounding box, ~10 MB for Vermont and ~0.5 GB for California.
 slices.json                  # Geofabrik extracts × assigned day-of-month
 scripts/gen-slices.mjs       # generate a whole-world slice list from Geofabrik's index
 scripts/bake-all.sh          # one-time local seed: bake every slice → R2 (resumable)
-scripts/bake-slice.sh        # download → filter → tile → diff → upload
+scripts/bake-slice.sh        # download → filter → tile → pack → publish (timed per phase)
+scripts/archive.mjs          # the .wta format (SPEC.md §11) — encode + decode, shared
+scripts/pack-archives.mjs    # OUT_DIR → one archive per version, verified byte-for-byte
 scripts/tile.mjs             # OSM features → v4 tiles + gzip
 scripts/dem.mjs              # Copernicus GLO-30 reader (COG over HTTP range, no deps)
 scripts/inspect-bake.mjs     # look at what a LOCAL bake produced, before paying for it
@@ -198,9 +233,20 @@ OUT_DIR=./out R2_DRY_RUN=1 ./scripts/bake-slice.sh \
 **3. Full loop with the app.** Serve `./out` like the CDN, then point the app at it:
 
 ```bash
-node scripts/serve-local.mjs ./out            # http://localhost:8788, gzip headers, 404 = empty
+node scripts/serve-local.mjs ./out            # http://localhost:8788
+# Serves BOTH layouts: /v5/archive/… with real Range support (206, content-range) — which
+# is what the app reads — and the /v5/<i>/<j>.json.gz objects the packer packs. An unranged
+# GET of a .wta answers 416 rather than a gigabyte, the same refusal the client makes.
 # iOS simulator can use localhost; a real device on your LAN uses your Mac's IP.
 # In the app build:  EXPO_PUBLIC_TILES_HOST=http://localhost:8788
+```
+
+**3b. Verify a pack with no server at all.** `--local` points the verifier at an `OUT_DIR`'s
+`archive/` and resolves through the same index → bitmap → directory → range path it uses
+against the CDN, reading a file descriptor instead of a `Range` header:
+
+```bash
+node scripts/verify-coverage.mjs --local ./out/archive --slice district-of-columbia
 ```
 
 **4. Validate the workflow itself** (the matrix/plan logic) without pushing, via
@@ -223,29 +269,32 @@ export R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… R2_BUCKET
 ./scripts/bake-slice.sh <pbf-url> <slice-name>
 ```
 
-**Resuming an upload that died.** Tiling a big slice costs a download plus tens of
-minutes of CPU; the upload is hundreds of thousands of small PUTs and is the part
-that actually fails (flaky endpoint, laptop sleeping, `^C`). `R2_UPLOAD_ONLY=1`
-reuses an `OUT_DIR` that already has tiles *and* its two hash manifests, and goes
-straight to diff + upload:
+**Re-publishing without re-baking.** Tiling a big slice costs a download plus tens of
+minutes of CPU. `R2_UPLOAD_ONLY=1` reuses an `OUT_DIR` that already has tiles *and* its
+three hash manifests, and goes straight to pack + publish:
 
 ```bash
 OUT_DIR=./out R2_UPLOAD_ONLY=1 ./scripts/bake-slice.sh <pbf-url> <slice-name>
 ```
 
-The diff makes this safe to re-run: already-uploaded tiles hash-match and are
-skipped. Note the manifests in `OUT_DIR` belong to **whichever slice tiled last** —
-`OUT_DIR` accumulates tiles across a multi-slice local seed, but `hashes.json` does
-not, so always pass the slice name whose manifests are currently on disk.
+Safe to re-run: if the packed archive's `sha256` matches the published one, nothing is
+uploaded at all. This is also the path a **packaging** change takes — the archive format can
+be changed and republished from an existing bake output without repeating the 6–10 hours,
+which is the whole reason `bake-all.sh` stopped deleting `OUT_DIR`.
 
-`R2_CONCURRENCY` (default 128) sets in-flight requests per `aws` process. Lower it
-if R2 starts returning 429s.
+Note the manifests in `OUT_DIR` belong to **whichever slice tiled last** — `OUT_DIR`
+accumulates tiles across a multi-slice local seed, but `hashes.json` does not, so always
+pass the slice name whose manifests are currently on disk.
+
+`R2_CONCURRENCY` (default 128) sets in-flight requests per `aws` process. It matters far
+less than it did: a publish is now a handful of PUTs, not hundreds of thousands.
 
 ## Verifying a bake
 
 ```bash
 TILES_HOST=https://tiles.example.com node scripts/verify-coverage.mjs
 TILES_HOST=…                          node scripts/verify-coverage.mjs --slice utah
+                                      node scripts/verify-coverage.mjs --local ./out/archive
 ```
 
 Counting objects in the bucket proves nothing about them: **an HTTP 200 is true for
@@ -254,9 +303,21 @@ received. So this fetches known coordinates through the CDN and asserts on thing
 only real OSM data produces — way counts, named streets, crossings, v5 landcover
 polygons, and geometry that actually falls inside the cell it was served for (which
 is what catches a mis-keyed bake). Cells expected to be thin are asserted thin, not
-dense: a desert track cell must have ≥1 way and must not 404, but demanding volume
-there would be asserting a lie about the terrain. Ocean cells must 404 — a 200 there
-is what "we published 200k empty tiles" looks like from outside.
+dense: a desert track cell must have ≥1 way and must resolve to a tile, but demanding volume
+there would be asserting a lie about the terrain.
+
+Since the archive move it also checks the two absences SEPARATELY, because a directory
+lookup can succeed while returning nothing and that is indistinguishable from a broken
+decoder if nobody asserts on it:
+
+* `empty` — the cell must be a **hole**: a published slice's coverage bitmap claims this
+  ground and its directory has no tile for the cell. A tile here is what "we published 200k
+  empty tiles" looks like from outside.
+* `uncovered` — **no** published slice claims this ground. This is the probe that catches a
+  bake writing cells it does not own.
+
+Under the object layout both were "expect 404", so an `empty` probe passed for a region that
+had never been baked at all.
 
 Exits non-zero on any failure, so it can gate a bake. Add probes when you add a
 slice; a slice with no probe is a slice nobody can prove.
@@ -265,8 +326,9 @@ slice; a slice with no probe is a slice nobody can prove.
 
 Rather than waiting a full month for the day-spread CI to trickle in global coverage,
 seed the entire world once from your machine, then let the schedule keep it fresh.
-CI needs no change: `bake-slice.sh` diffs each slice against the hash manifests this
-seed writes to R2, so subsequent scheduled runs upload only real OSM changes.
+CI needs no change: `bake-slice.sh` compares each slice's packed archive against the
+`sha256` this seed publishes, so subsequent scheduled runs upload only slices whose tiles
+actually moved — a whole slice at a time now, not a whole tile at a time (SPEC.md §11.6).
 
 ```bash
 # 1. Generate the world slice list (leaf Geofabrik extracts, ~500 regions).
@@ -285,8 +347,10 @@ world across the month.
 Notes:
 - **Needs `osmium-tool jq awscli` locally** (`brew install osmium-tool jq awscli`) plus Node.
 - **One-time write cost.** The first upload writes every tile (~5–10 M objects) — R2
-  Class-A writes at $4.50/M (1 M free) ≈ **$25–45, once**. Storage/reads/egress after
-  are cents (see `HOSTING.md`). Same cost whether seeded locally or by CI.
+  Class-A writes at $4.50/M (1 M free) ≈ **$25–45, once** — under the OBJECT layout. Under
+  archives (SPEC.md §11) the same seed is a few thousand writes and rounds to zero; the
+  write count is now proportional to the number of SLICES, not to the number of cells.
+  Storage/reads/egress are unchanged and are cents (see `HOSTING.md`).
 - **Bandwidth + politeness.** Keep `JOBS` low (≤3–4); this pulls hundreds of extracts
   from Geofabrik. Each slice's `.pbf` is deleted after tiling.
 - **A few giant leaf regions** may need more heap; `bake-slice.sh` runs Node with
@@ -295,8 +359,13 @@ Notes:
 
 ## App wiring
 
-The app change is small: `walkableWaysRemote(pos)` fetches
-`v4/<latIdx>/<lngIdx>.json.gz` and returns the **full v4 payload** (ways + names
-+ crossings) instead of the ways-only PostGIS RPC — which also fixes the current
-gap where remote tiles carry no crossings. Overpass stays as the R2-miss
-fallback. See `SPEC.md §6`.
+The app change is small: `walkableWaysRemote(pos)` resolves a cell through
+`v4/archive/index.json` → the slice directory → a byte range, and returns the **full v4
+payload** (ways + names + crossings) instead of the ways-only PostGIS RPC — which also fixes
+the current gap where remote tiles carry no crossings. Overpass stays as the miss fallback.
+See `SPEC.md §6` for the client half and `§11.7` for the resolution path and its measured
+request cost (11 requests for a cold block, 0 for a warm one).
+
+Ausculta already reads this layout: `apps/mobile/src/tiles/archive.ts` (format),
+`resolver.ts` (transport and the two caches), `cache.ts` (the read-through, TTLs, eviction
+and the prefetch ring), with the properties asserted in `evals/tiles.test.ts`.

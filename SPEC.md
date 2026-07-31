@@ -1297,3 +1297,306 @@ poly (§4); the hash is sha256 of the uncompressed JSON; `bake-slice.sh` diffs a
 published `v5c/hashes/<slice>.json` and uploads only what moved. **A slice that re-bakes v5
 must re-bake this beside it** — a coarse tile whose v5 tile moved is a map whose zoomed-out
 view disagrees with its zoomed-in one — and it costs ~0.2% of v5's bytes to do so.
+
+---
+
+## 11. `.wta` — the walkable tile archive, normative
+
+**Status: this replaces the object layout.** As of 2026-07-31 the CDN publishes ONE archive
+per slice per version instead of one object per cell, and the client reads tiles as HTTP
+byte ranges. The object layout (`<ver>/<i>/<j>.json.gz`) is no longer published or read.
+Nobody was using the app yet, so there is no compatibility layer and there should not be one.
+
+The tile BYTES are unchanged. §10 is untouched; this section is about packaging only.
+
+### 11.0 Why, and why not PMTiles
+
+The motivation is the bake, not the runtime. Counted on the live bucket and the two trial
+bakes, a full v5 + v5c re-bake is roughly **1.2–1.3 million Class-A writes**, which at R2's
+per-million write price is essentially the whole **$6–9** cost of a bake. The bytes are
+cheap; the object count is the bill. Under archives that becomes **about fifteen objects**.
+ausculta's `docs/PMTILES-SCOPING.md` has the full costing and is the document this section
+implements.
+
+Nothing is saved at runtime, and it is worth saying out loud: a range request is the same
+Class-B read an object GET was, the client issues the same number of tile requests it did
+before, and storage and egress are unchanged. Anyone selling this as a runtime optimisation
+has the wrong model.
+
+Two structural wins, and they are the reason this is worth doing at all:
+
+1. **"Empty" and "not baked yet" stop being the same answer.** §11.5.
+2. **A republish is atomic.** An archive is one immutable object and an index entry; a
+   partial upload can no longer leave the bucket in a mixed state.
+
+**The format is NOT PMTiles v3, and that is deliberate.** The packaging idea is taken
+wholesale — one archive, a directory, ranges, static hosting, no backend — and the byte
+format is not. A PMTiles v3 directory is keyed by a `tileId` every reader in that ecosystem
+derives from `(z, x, y)` by Hilbert order. This grid is not z/x/y; a tile id has to be
+invented (§11.2). Writing invented ids into a spec-conformant v3 file produces a file every
+PMTiles tool will happily open, report as valid, and then read the **wrong tile** from —
+strictly worse than being unreadable, and the same class of failure this project already
+paid for once (a module that resolved, type-checked and bundled while returning placeholder
+values; the lesson recorded from it is *assert on a value, never on a shape*). Two lesser
+reasons: v3 has no tile type for "gzipped JSON" and mandates min/max zoom this grid has no
+honest value for, and its 16 KiB root-directory cap forces leaf directories and a second
+round trip.
+
+What IS taken from v3, verbatim in spirit, is the **directory encoding** (§11.3). That is
+where the size lives and it is a solved problem.
+
+The magic is `WTA1`, which no PMTiles reader accepts. That is the point.
+
+### 11.1 File layout
+
+| offset | bytes | field |
+|---|---|---|
+| 0 | 4 | magic, ASCII `WTA1` |
+| 4 | 1 | format version = 1 |
+| 5 | 1 | directory compression (1 = gzip) |
+| 6 | 1 | tile compression (1 = gzip) |
+| 7 | 1 | reserved, 0 |
+| 8 | 4 | u32LE `gridDenom` = 100 (cells per degree; `TILE_DEG` = 1/100) |
+| 12 | 4 | u32LE `tileCount` |
+| 16 | 16 | i32LE `minI`, `maxI`, `minJ`, `maxJ` |
+| 32 | 16 | u64LE `metaOffset`, `metaLength` |
+| 48 | 16 | u64LE `dirOffset`, `dirLength` (gzipped size on disk) |
+| 64 | 16 | u64LE `tileDataOffset`, `tileDataLength` |
+| 80 | 48 | reserved, 0 |
+
+Header is exactly **128 bytes**, then:
+
+```
+128                metadata   gzip(JSON) — self-description for a file on a disk
+dirOffset          directory  gzip(§11.3)
+tileDataOffset     tile data  bodies concatenated, ascending tile id, NO padding
+```
+
+Each tile body is the **exact `.json.gz` byte string** the object layout published. Nothing
+is recompressed or re-serialised. `pack-archives.mjs` re-opens every archive it writes,
+decodes the directory *from the file*, pulls every tile back by offset and compares it with
+the source object; an archive that fails is deleted rather than published.
+
+**Determinism is required.** Nothing in the archive carries a timestamp — `bakedAt` lives
+in the index sidecar (§11.4), not in the file — and Node's gzip writes MTIME 0. So the same
+tiles pack to the same bytes and `sha256(file)` is a content identity rather than a build
+id. That is what makes "did this slice change" one comparison instead of a quarter of a
+million (§11.6).
+
+The header is fixed-size and first so a reader with no index can bootstrap from a single
+`Range: bytes=0-127`. The client never does — `index.json` carries the directory's byte
+range — so the header exists for tooling and for files on disk.
+
+### 11.2 Tile id
+
+```
+tileId(i, j) = (i + 9000) × 36001 + (j + 18000)
+```
+
+`i ∈ [−9000, 8999]`, `j ∈ [−18000, 17999]`, so the id is injective over the whole grid and
+its maximum is ≈ 6.5 × 10⁸ — inside `uint32`, which matters because the client decodes a
+directory into typed arrays rather than into a `Map` an order of magnitude larger.
+
+### 11.3 Directory
+
+Uncompressed body, then gzipped:
+
+```
+varint   n                      entry count
+n × varint   idDelta            entry 0 is the absolute id; entry k is id[k] − id[k−1], > 0
+n × varint   length             tile body length in bytes
+```
+
+Varints are unsigned LEB128. **Offsets are implicit**: `offset[0] = 0`,
+`offset[k] = offset[k−1] + length[k−1]`, relative to `tileDataOffset`. There is no way to
+express a gap, and none is needed — the packer writes bodies contiguously in id order.
+
+Dropping v3's explicit offset column costs the ability to dedupe identical tiles and to
+carry leaf directories. Neither is worth a third of the directory here: tile bodies are
+per-cell geometry and are essentially never equal, and the measurements below say a flat
+directory is small enough to fetch whole.
+
+**MEASURED** on the two trial bakes (2026-07-31), directory gzipped as stored:
+
+| slice | ver | tiles | tile bytes | archive bytes | directory | B/entry | overhead |
+|---|---|---|---|---|---|---|---|
+| district-of-columbia | v4 | 188 | 14,399,444 | 14,400,356 | 607 | 3.23 | 0.006% |
+| district-of-columbia | v5 | 188 | 15,231,413 | 15,232,326 | 608 | 3.23 | 0.006% |
+| district-of-columbia | v5c | 135 | 28,785 | 29,396 | 306 | 2.27 | 2.123% |
+| vermont | v4 | 27,737 | 117,052,777 | 117,107,382 | 54,309 | 1.96 | 0.047% |
+| vermont | v5 | 28,445 | 146,156,824 | 146,213,365 | 56,245 | 1.98 | 0.039% |
+| vermont | v5c | 18,486 | 3,179,256 | 3,203,229 | 23,676 | 1.28 | 0.754% |
+
+Two bytes an entry, so a 100k-tile state carries a ~200 KB directory: one range request,
+once, cached on the device for as long as the archive it describes exists. (The prototype
+that argued for this format used a naive fixed-width directory and measured 3,760 B for
+district-of-columbia's 188 tiles. The columnar form is 608.)
+
+A directory lookup is a binary search. `−1` is a **HOLE** and is an ANSWER, not a failure.
+
+### 11.4 Publishing layout and `index.json`
+
+```
+<ver>/archive/<slice>-<sha12>.wta    the archive; immutable, cache-control 1 year
+<ver>/archive/<slice>.idx.json       this slice's index entry;  cache-control 60 s
+<ver>/archive/index.json             every slice's entry, derived; cache-control 60 s
+```
+
+The archive is **content-addressed** — named by the first 12 hex of its own sha256 — and
+that is the cache-control decision rather than a flourish. An archive at a fixed key is a
+mutable object at a stable URL, which forces a short TTL on a gigabyte file so a republish
+is seen, and therefore revalidation on a file that never changes in place. Naming it by its
+digest inverts that: the archive is immutable and cacheable for a year, and `index.json` —
+one kilobyte — is the only thing with a short TTL. A republish is a new object plus a new
+index, and no client can ever see a directory that disagrees with its tiles because the two
+can no longer come from different generations of the same key.
+
+The publisher keeps **two generations** live. A client's index is at most
+`ARCHIVE_INDEX_TTL_MS` (1 hour) old and is still asking for the previous archive; the
+generation before that is deleted.
+
+`index.json` is **rebuilt from the sidecars**, never read-modify-written:
+
+```json
+{ "v": 1, "version": "v5", "slices": [ { …sidecar… } ] }
+```
+
+Two slices publishing at once therefore cannot corrupt it. The worst a lost race does is
+omit a slice until the next rebuild, and a missing slice reads to the client as "not baked
+yet" — the honest answer, and self-healing. A read-modify-write on a shared blob would
+instead delete a slice permanently, which is the race the per-slice hash manifests were
+shaped to avoid in §5. The publisher asserts by VALUE that the rebuilt index contains the
+slice it just uploaded, and refuses to publish the index otherwise.
+
+Sidecar / index entry:
+
+| field | meaning |
+|---|---|
+| `slice`, `version` | who and which prefix |
+| `path` | key under the CDN root, e.g. `v5/archive/vermont-ed71947eba99.wta` |
+| `bytes`, `sha256` | archive size and content identity |
+| `tileCount`, `tileBytes` | what is inside |
+| `grid` | cells per degree, 100 |
+| `bbox` | `[minI, maxI, minJ, maxJ]` |
+| `dir` | `[offset, length]` of the gzipped directory. The client fetches exactly this range and never reads the header. |
+| `tileData` | `[offset, length]`; `offset` also equals `dir[0] + dir[1]` |
+| `coverBlock`, `cover` | §11.5 |
+
+### 11.5 Coverage bitmap — the reason "empty" and "not baked" are different answers
+
+CLAUDE.md records the trap this removes:
+
+> **Tile 404s cache for 5 minutes, not 30 days.** A 404 means "empty cell" — permanent for
+> ocean, transient for a region not baked yet.
+
+That hedge was forced by one-object-per-cell: from inside a single fetch nothing can tell
+the two apart, so the TTL had to assume the worse one and a coastline was re-requested every
+five minutes forever. The archive splits them:
+
+* **HOLE** — some published slice's bitmap CLAIMS this cell's block, and its directory does
+  not list the cell. The bake looked here and wrote nothing. **Permanent.** The client
+  stores it as an empty payload on the 30-day payload TTL.
+* **UNBAKED** — no published slice claims the block at all. **Transient.** The client stores
+  it as `notFound` on the 5-minute TTL, which is now the only thing that flag means.
+
+A slice's **bbox cannot do this job**. Vermont's bounding rectangle contains a large piece of
+New York, so "inside the bbox and absent from the directory" would brand unbaked New York a
+permanent hole and hide it for thirty days — exactly the bug the 5-minute TTL exists to
+prevent. So the entry carries a bitmap of the 0.1° blocks (`coverBlock` = 10 cells ≈ 11 km)
+the slice actually wrote tiles into. It follows the state's shape and it costs nothing:
+**Vermont is 24 × 21 blocks, 63 bytes, 84 characters of base64.**
+
+Encoding: row-major over `[originI .. originI + rows − 1] × [originJ .. originJ + cols − 1]`
+in BLOCK indices, one bit per block, LSB first within each byte, base64.
+
+```json
+"coverBlock": 10,
+"cover": { "origin": [427, -735], "dims": [24, 21], "bits": "…" }
+```
+
+**Bounded interior fill.** A block with no tile in it is usually water or emptiness the bake
+DID look at; leaving it unclaimed makes the client call it "not baked" and retry it forever,
+which is the behaviour this whole section removes. So a gap between two claimed blocks *on
+the same row* is filled — the slice demonstrably owns ground on both sides of it at that
+latitude — up to `COVER_FILL_MAX` = **8 blocks ≈ 88 km**. Cape Cod Bay (~40 km) fills;
+Lake Michigan (~150 km) does not, so a slice with two lobes cannot quietly claim what sits
+between them. Over the limit the answer reverts to "not baked", which is the conservative
+direction: a client that retries too often is a bill, a client that caches a wrong "empty"
+for thirty days is a region with no ground in it.
+
+**The residue, stated:** a 0.1° block that straddles a slice border is claimed by whichever
+slice wrote into it, so cells belonging to an unbaked neighbour inside that block read as
+holes. That is a ~11 km ribbon along a state line, bounded and known, against the old
+behaviour's "every unbaked cell in the world, re-requested every five minutes".
+
+### 11.6 What "changed" means now
+
+The per-tile hash manifest is **gone from the upload path**. It was an incremental-upload
+gate and there is nothing left to gate: a slice is one object per version, and one object
+either goes up or it does not. The manifests are still *written* (`tile.mjs` writes them,
+`inspect-bake.mjs` reads them, and they remain the only per-cell record of what a bake
+produced) and still published; they no longer decide anything.
+
+> **Changed** now means: *this slice's archive is not byte-identical to the published one.*
+> One `sha256` comparison replaces a quarter of a million, and it is exact because §11.1
+> makes the archive deterministic.
+
+The cost is granularity: it went from per-cell to **per-slice-per-version**. A one-street
+edit in Vermont re-uploads 146 MB; the same edit in Utah re-uploads about a gigabyte.
+PMTILES-SCOPING priced that and accepted it, on the grounds that the bakes actually run are
+habitat-grid and classifier changes, which touch nearly every tile anyway — incremental
+upload was already paying for almost nothing.
+
+### 11.7 How a client resolves a tile
+
+1. `GET <ver>/archive/index.json` — once per version per hour.
+2. Candidate slices = those whose bitmap claims the cell's block, **in slice-name order**.
+   None ⇒ UNBAKED.
+3. For each candidate, `Range` the directory (`dir[0]`, `dir[1]`) — once per slice, cached
+   under the archive's `sha256`, so a republish invalidates it with no clock involved.
+4. Binary-search the directory. Present ⇒ `Range` the tile at
+   `tileData[0] + offset[k]`, length `length[k]`. Absent in every candidate ⇒ HOLE.
+
+**Request cost, measured against a local pack of district-of-columbia through real HTTP:**
+
+| | requests |
+|---|---|
+| first 600 m block of a session, cold | **11** = 9 tiles + index + directory |
+| any later cold block, same slice | 1 per cell (9) — identical to the object layout |
+| warm block | **0** |
+| a cell in an uncovered region | **0** (the index already answered) |
+
+**A ranged read MUST require 206.** A 200 means the origin ignored `Range` and is handing
+back the entire archive — about a gigabyte for a big slice, per tile, onto a phone. Both the
+client and `verify-coverage.mjs` reject it by status rather than discover it by byte count.
+
+**The tile bodies are still gzip and the platform no longer inflates them.** An object GET
+carried `content-encoding: gzip` and the networking stack decompressed transparently; a
+range of an archive is opaque bytes. The client inflates (`fflate`), sniffing the gzip magic
+first so that if the CDN is ever configured to decode ranges the fast path costs nothing.
+
+**Privacy is unchanged and the leak surface moved.** The cell index used to be in the URL
+path and is now in the `Range` header; both are derived from the cell index alone, via the
+same request set, in the same sorted order. The archive NAME is new information and is
+strictly coarser than what was already disclosed — `vermont.wta` says "somewhere in
+Vermont", which a 1.1 km cell index already said far more precisely. See
+`apps/mobile/src/tiles/archive.ts` and `evals/tiles.test.ts` §8.
+
+### 11.8 What was deliberately not built
+
+**Range coalescing.** Tiles sit in the archive in tile-id order, which on this grid means
+row by row, west to east — so a 3 × 3 block is three runs of three consecutive directory
+entries, and nine requests could be three. It is not done, because this is a packaging
+change and keeping the request count identical is what makes a regression attributable; and
+because every assertion in `evals/tiles.test.ts` about dispatch order, the live-wins gate,
+per-cell TTLs and the prefetch ring is written per cell, so coalescing rewrites all of them
+at the same time as the transport. Round trips were never the expensive part — the coarse
+layer exists because BYTES were. If it is built later it needs its own eval section proving
+the privacy property survives it, and it should land alone.
+
+**Tile dedupe and leaf directories** (§11.3). Both are v3 features this format drops and
+would need a version bump to add.
+
+**A Worker that re-serves a range with `content-encoding: gzip`** so the platform inflates
+for us. It would remove the `fflate` dependency and it reintroduces a backend and a
+per-request compute cost, which is the thing static archives exist to avoid.

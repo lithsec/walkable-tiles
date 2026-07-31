@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Prove published coverage BY VALUE, through the public CDN.
+// Prove published coverage BY VALUE, through the public CDN — now THROUGH THE ARCHIVES.
 //
 // The failure this exists to catch: an HTTP 200 is true for an empty tile, and a
 // hash manifest is happy to claim tiles the bucket never received. `aws s3 ls`
@@ -9,32 +9,161 @@
 // landcover polygons, and geometry that actually falls inside the cell it was
 // served for.
 //
+// ── WHAT THE ARCHIVE FORMAT ADDS TO THAT ──────────────────────────────────────────────
+//
+// This script used to GET an object per probe and read the status code. Under SPEC §11 a
+// tile is a byte range inside a per-slice `.wta`, so the whole resolution path — index,
+// coverage bitmap, directory, range — sits between the probe and the answer, and EVERY
+// STEP OF IT IS A NEW WAY TO PASS VACUOUSLY. In particular:
+//
+//   • an `index.json` that parses is not an index that COVERS anything;
+//   • a directory that decodes is not a directory that CONTAINS the cell;
+//   • and a directory lookup can succeed and return NOTHING, which is the format's whole
+//     point and is also indistinguishable from a broken decoder if nobody checks.
+//
+// So absence is now checked as a SPECIFIC absence rather than as a status code:
+//
+//   expect: 'empty'      the cell must be a HOLE — a published slice's bitmap CLAIMS this
+//                        ground and its directory does not list the cell. Baked, empty,
+//                        permanent. Asserting this proves the slice reaches here.
+//   expect: 'uncovered'  NO published slice claims this ground at all. Not baked. This is
+//                        the probe that catches a bake writing cells it does not own.
+//
+// Under the object layout both were "404" and this file could not tell them apart, which
+// meant the two probes below labelled `unbaked` were asserting the same thing as the ocean
+// probes. They are not the same thing and now they do not pass for the same reason.
+//
 // Usage:
 //   TILES_HOST=https://tiles.example.com node scripts/verify-coverage.mjs
 //   ... --slice utah          only probes for one slice
 //   ... --json                machine-readable result
+//   ... --local <dir>         resolve against a LOCAL pack (an OUT_DIR's `archive/`) with
+//                             no network at all — the same resolver, a different byte
+//                             source. This is what makes a `--trial` bake verifiable.
 // Exits non-zero if any probe fails, so it can gate a bake.
-
-const HOST = (process.env.TILES_HOST || process.env.EXPO_PUBLIC_TILES_HOST || '').replace(/\/$/, '');
-if (!HOST) {
-  console.error('set TILES_HOST (or EXPO_PUBLIC_TILES_HOST) to the CDN origin');
-  process.exit(2);
-}
+import { readFileSync, openSync, readSync, closeSync, existsSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
+import { coverHas, decodeDirectory, findTile } from './archive.mjs';
 
 const args = process.argv.slice(2);
 const onlySlice = args.includes('--slice') ? args[args.indexOf('--slice') + 1] : null;
 const asJson = args.includes('--json');
+const LOCAL = args.includes('--local') ? args[args.indexOf('--local') + 1] : null;
+
+const HOST = (process.env.TILES_HOST || process.env.EXPO_PUBLIC_TILES_HOST || '').replace(/\/$/, '');
+if (!HOST && !LOCAL) {
+  console.error('set TILES_HOST (or EXPO_PUBLIC_TILES_HOST) to the CDN origin, or pass --local <archive dir>');
+  process.exit(2);
+}
 
 const TILE_DEG = 0.01;
 const cellOf = (lat, lng) => [Math.floor(lat / TILE_DEG), Math.floor(lng / TILE_DEG)];
 
+// ── The byte source. Two transports, ONE resolver. ────────────────────────────────────
+//
+// `--local` is not a second implementation of the lookup — it is the same functions over a
+// file descriptor instead of a `Range` header, which is the only way a local check can be
+// evidence about the published one.
+
+async function readRange(version, path, offset, length) {
+  if (LOCAL) {
+    // Published layout is `<ver>/archive/<slice>-<sha>.wta`; a local pack is flat under
+    // `<dest>/<ver>/`. Only the DIRECTORY differs — the file name is the same, and it is
+    // the digest, so a local probe is reading the exact bytes an upload would send.
+    const file = join(LOCAL, version, basename(path));
+    const fd = openSync(file, 'r');
+    try {
+      const b = Buffer.alloc(length);
+      let got = 0;
+      while (got < length) {
+        const n = readSync(fd, b, got, length - got, offset + got);
+        if (n === 0) break;
+        got += n;
+      }
+      if (got !== length) throw new Error(`short read ${got}/${length} from ${file}`);
+      return b;
+    } finally {
+      closeSync(fd);
+    }
+  }
+  const res = await fetch(`${HOST}/${path}`, {
+    headers: { Range: `bytes=${offset}-${offset + length - 1}` },
+  });
+  // A 200 means the origin ignored `Range` and is handing back the whole archive. That is
+  // a gigabyte for a big slice, and it is the one status that would otherwise look like a
+  // pass. The client refuses it for the same reason (apps/mobile/src/tiles/archive.ts).
+  if (res.status !== 206) throw new Error(`range ${offset}+${length} on ${path}: HTTP ${res.status}, expected 206`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length !== length) throw new Error(`range ${offset}+${length} on ${path} returned ${buf.length} B`);
+  return buf;
+}
+
+async function readIndex(version) {
+  if (LOCAL) {
+    const f = join(LOCAL, version, 'index.json');
+    if (!existsSync(f)) return null;
+    return JSON.parse(readFileSync(f, 'utf8'));
+  }
+  const res = await fetch(`${HOST}/${version}/archive/index.json`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`index.json for ${version}: HTTP ${res.status}`);
+  return await res.json();
+}
+
+const indexCache = new Map();
+const dirCache = new Map();
+
+async function archiveIndex(version) {
+  if (!indexCache.has(version)) indexCache.set(version, await readIndex(version));
+  return indexCache.get(version);
+}
+
+async function directoryFor(version, entry) {
+  const key = `${version}/${entry.slice}/${entry.sha256}`;
+  if (!dirCache.has(key)) {
+    const gz = await readRange(version, entry.path, entry.dir[0], entry.dir[1]);
+    dirCache.set(key, decodeDirectory(gunzipSync(gz)));
+  }
+  return dirCache.get(key);
+}
+
+/**
+ * Resolve one cell the way the client does. Returns one of:
+ *   {kind:'tile', body, bytes, slice}  — real bytes, pulled by offset
+ *   {kind:'hole', slice}               — covered by a slice, absent from its directory
+ *   {kind:'uncovered'}                 — no published slice claims this ground
+ *   {kind:'noindex'}                   — nothing published under this prefix at all
+ */
+async function resolveCell(version, i, j) {
+  const index = await archiveIndex(version);
+  if (!index || !Array.isArray(index.slices)) return { kind: 'noindex' };
+  const candidates = index.slices
+    .filter((s) => coverHas(s.cover, i, j, s.coverBlock))
+    .sort((a, b) => (a.slice < b.slice ? -1 : 1));
+  if (candidates.length === 0) return { kind: 'uncovered' };
+  for (const entry of candidates) {
+    const dir = await directoryFor(version, entry);
+    const k = findTile(dir, (i + 9000) * 36001 + (j + 18000));
+    if (k < 0) continue;
+    const off = entry.tileData[0] + dir.offsets[k];
+    const buf = await readRange(version, entry.path, off, dir.lengths[k]);
+    return { kind: 'tile', slice: entry.slice, bytes: buf.length, body: buf };
+  }
+  return { kind: 'hole', slice: candidates[0].slice };
+}
+
 // `expect`:
-//   dense  — a built-up cell. Must have lots of ways, named streets, crossings.
-//   sparse — real but thin (desert track, levee, farm road). Must have >=1 way and
-//            must NOT 404, but no volume floor: asserting density here would be
-//            asserting a lie about the terrain.
-//   empty  — must 404. A 200 here means a tile was written where there is no data,
-//            which is how "we published 200k empty tiles" looks from outside.
+//   dense     — a built-up cell. Must have lots of ways, named streets, crossings.
+//   sparse    — real but thin (desert track, levee, farm road). Must have >=1 way and must
+//               resolve to a tile, but no volume floor: asserting density here would be
+//               asserting a lie about the terrain.
+//   empty     — must be a HOLE: a published slice covers this ground and its directory has
+//               no tile for the cell. A tile here means one was written where there is no
+//               data, which is how "we published 200k empty tiles" looks from outside.
+//   uncovered — no published slice claims this ground at all. See the archive note above:
+//               `empty` and `uncovered` used to be the same 404 and are now different
+//               answers, so an `empty` probe no longer passes for an unbaked region.
 //
 // Choosing an `empty` probe needs care in v5, which writes landcover-only cells. A
 // *mapped* water body (Great Salt Lake is a `natural=water` polygon) legitimately has
@@ -66,13 +195,13 @@ const PROBES = [
   ['utah', 'downtown Provo', 40.2338, -111.6585, 'dense', ['v4', 'v5']],
   ['utah', 'Capitol Reef backcountry', 38.1049, -111.5999, 'sparse', ['v4', 'v5']],
   // v4-only: the lake surface is a mapped natural=water polygon, so v5 has a
-  // landcover-only tile here and a 404 assertion would be wrong.
+  // landcover-only tile here and a hole assertion would be wrong.
   ['utah', 'Great Salt Lake open water', 41.1, -112.5, 'empty', ['v4']],
 
   // Nothing should exist outside the published slices. This is the probe that catches
   // a bake writing cells it does not own — the seam rule failing open.
-  ['unbaked', 'central Nevada (no slice baked)', 39.5, -117.0, 'empty', ['v4', 'v5']],
-  ['unbaked', 'mid-Pacific', 30.0, -150.0, 'empty', ['v4', 'v5']],
+  ['unbaked', 'central Nevada (no slice baked)', 39.5, -117.0, 'uncovered', ['v4', 'v5']],
+  ['unbaked', 'mid-Pacific', 30.0, -150.0, 'uncovered', ['v4', 'v5']],
 
   // ── v4 AND v5 for the three states whose v5 bake is pending ────────────────────────
   //
@@ -187,23 +316,54 @@ const PROBES = [
   // from inside the app and a wrong `m` reads as a working feature.
   ['massachusetts', 'Boston is not mountain', 42.3601, -71.0589, 'dense', ['v5'],
     { habitatLacks: 'm' }],
+
+  // ── THE TRIAL SLICES ────────────────────────────────────────────────────────────────
+  //
+  // Neither is published, and both are baked locally by `bake-states.sh --trial`. They are
+  // here so `--local <OUT_DIR>/archive --slice vermont` verifies a pack END TO END with no
+  // bucket and no credentials — index, coverage bitmap, directory, byte range, and a value
+  // assertion on the bytes that come back. That is the only check available before an
+  // upload, and it is the one that would catch a packer that indexed the wrong offsets.
+  ['district-of-columbia', 'the National Mall', 38.8895, -77.0230, 'dense', ['v4', 'v5']],
+  ['district-of-columbia', 'Rock Creek Park', 38.9500, -77.0450, 'dense', ['v4', 'v5'],
+    { habitatHas: 'w' }],
+  // Inside DC's cover blocks, outside its tiles — south of the Anacostia, ground the
+  // District's .poly does not own. A HOLE, and the probe that separates the two absences:
+  // the bitmap claims the block, the directory does not list the cell. Verified against the
+  // packed directory before the probe was written (201 such cells in DC's cover).
+  ['district-of-columbia', 'a covered cell the bake never wrote', 38.795, -77.095, 'empty', ['v5']],
+  ['district-of-columbia', 'central Nevada', 39.5, -117.0, 'uncovered', ['v4', 'v5']],
+
+  ['vermont', 'downtown Burlington', 44.4759, -73.2121, 'dense', ['v4', 'v5']],
+  // A real thin cell — 9 ways, 51 points inside it. Chosen off the packed directory rather
+  // than off a map, because a `sparse` probe over a cell whose only geometry belongs to a
+  // neighbour asserts nothing about this slice.
+  ['vermont', 'back roads NW of Bennington', 43.005, -73.135, 'sparse', ['v4', 'v5']],
+  ['vermont', 'a covered cell the bake never wrote', 42.725, -73.295, 'empty', ['v5']],
+  ['vermont', 'mid-Pacific', 30.0, -150.0, 'uncovered', ['v4', 'v5']],
 ];
 
 const FLOORS = { ways: 200, named: 20, crossings: 50, ptsInCell: 100 };
 
 async function probe(ver, lat, lng) {
   const [i, j] = cellOf(lat, lng);
-  const url = `${HOST}/${ver}/${i}/${j}.json.gz`;
-  const res = await fetch(url);
-  if (res.status === 404) return { i, j, url, status: 404 };
-  if (!res.ok) return { i, j, url, status: res.status };
-  const buf = Buffer.from(await res.arrayBuffer());
-  // The CDN may or may not have already decoded content-encoding: gzip for us.
+  const where = `${ver}/${i}/${j}`;
+  let r;
+  try {
+    r = await resolveCell(ver, i, j);
+  } catch (err) {
+    return { i, j, url: where, kind: 'error', error: String(err.message ?? err) };
+  }
+  if (r.kind !== 'tile') return { i, j, url: where, kind: r.kind, slice: r.slice ?? null };
+  const buf = r.body;
+  // A tile body inside an archive is the published `.json.gz` byte for byte, so it is
+  // always gzip here — no transparent decoding happens on a byte range. The plain-text
+  // branch stays for the day the CDN grows one.
   let tile;
   try {
     tile = JSON.parse(buf.toString('utf8'));
   } catch {
-    tile = JSON.parse((await import('node:zlib')).gunzipSync(buf).toString('utf8'));
+    tile = JSON.parse(gunzipSync(buf).toString('utf8'));
   }
   const ways = tile.ways ?? [];
   let ptsInCell = 0;
@@ -215,8 +375,9 @@ async function probe(ver, lat, lng) {
   return {
     i,
     j,
-    url,
-    status: 200,
+    url: where,
+    kind: 'tile',
+    slice: r.slice,
     bytes: buf.length,
     v: tile.v,
     ways: ways.length,
@@ -270,16 +431,40 @@ function landmarkMiss(landmarks, w) {
 
 function judge(expect, ver, r, want) {
   const bad = [];
+  // A transport failure is never an absence. Under the object layout a dead origin and an
+  // empty cell were both "not 200"; here they are different values and conflating them
+  // would let a completely unreachable CDN pass every `empty` probe in the list.
+  if (r.kind === 'error') {
+    bad.push(`could not resolve: ${r.error}`);
+    return bad;
+  }
   if (expect === 'empty') {
-    if (r.status !== 404) bad.push(`expected 404 (no data here), got ${r.status}`);
+    // A HOLE: some published slice CLAIMS this ground and its directory does not list the
+    // cell. `uncovered` is not good enough — it would pass for a slice that was never
+    // published at all, which is exactly the vacuous pass this file exists to prevent.
+    if (r.kind === 'hole') return bad;
+    if (r.kind === 'uncovered') bad.push('no published slice covers this cell — expected a HOLE inside a covered slice');
+    else if (r.kind === 'noindex') bad.push(`nothing published under ${ver}/archive/`);
+    else bad.push(`expected a hole (baked, empty), got a ${r.bytes} B tile from ${r.slice}`);
     return bad;
   }
-  if (r.status === 404) {
-    bad.push('404 — tile absent (slice not published, or bake dropped it)');
+  if (expect === 'uncovered') {
+    if (r.kind === 'uncovered') return bad;
+    if (r.kind === 'hole') bad.push(`slice ${r.slice} claims ground it does not own`);
+    else if (r.kind === 'noindex') bad.push(`nothing published under ${ver}/archive/ — this probe proves nothing`);
+    else bad.push(`a ${r.bytes} B tile exists here, served from ${r.slice}`);
     return bad;
   }
-  if (r.status !== 200) {
-    bad.push(`HTTP ${r.status}`);
+  if (r.kind === 'noindex') {
+    bad.push(`nothing published under ${ver}/archive/`);
+    return bad;
+  }
+  if (r.kind === 'uncovered') {
+    bad.push('no published slice covers this cell — the slice is not baked');
+    return bad;
+  }
+  if (r.kind === 'hole') {
+    bad.push('the archive covers this cell and holds no tile for it (bake dropped it)');
     return bad;
   }
   const wantV = ver === 'v5' ? 5 : 4;
@@ -307,7 +492,7 @@ function judge(expect, ver, r, want) {
     }
   }
   if (expect === 'any') return bad;
-  if (r.ways < 1) bad.push('zero ways — served a 200 with no content');
+  if (r.ways < 1) bad.push('zero ways — the archive holds a tile here with no content in it');
   // Geometry must land in the cell it was served for. Catches a mis-keyed bake,
   // which no byte-count check can see.
   if (r.ptsInCell < 1) bad.push('no way geometry inside this cell');
@@ -336,9 +521,13 @@ for (const [slice, label, lat, lng, expect, versions, want] of PROBES) {
     if (!asJson) {
       const tag = bad.length ? 'FAIL' : 'ok  ';
       const detail =
-        r.status === 404
-          ? '404'
-          : `${r.bytes}B ways=${r.ways} named=${r.named} xings=${r.crossings}` +
+        r.kind !== 'tile'
+          ? r.kind === 'hole'
+            ? `HOLE in ${r.slice}`
+            : r.kind === 'error'
+              ? `ERROR ${r.error}`
+              : r.kind
+          : `${r.bytes}B ${r.slice} ways=${r.ways} named=${r.named} xings=${r.crossings}` +
             (ver === 'v5' ? ` landcover=${r.landcover} lm=${r.landmarks.length} litAcc=${r.attrWays}` : '') +
             ` inCell=${r.ptsInCell}` +
             (r.sampleName ? ` "${r.sampleName}"` : '');
@@ -348,7 +537,7 @@ for (const [slice, label, lat, lng, expect, versions, want] of PROBES) {
   }
 }
 
-if (asJson) console.log(JSON.stringify({ host: HOST, failed, results }, null, 2));
-else console.log(`\n${results.length - failed}/${results.length} probes passed against ${HOST}`);
+if (asJson) console.log(JSON.stringify({ host: LOCAL ? `file://${LOCAL}` : HOST, failed, results }, null, 2));
+else console.log(`\n${results.length - failed}/${results.length} probes passed against ${LOCAL ? `local pack ${LOCAL}` : HOST}`);
 
 process.exit(failed ? 1 : 0);
