@@ -41,7 +41,7 @@
 //                             no network at all — the same resolver, a different byte
 //                             source. This is what makes a `--trial` bake verifiable.
 // Exits non-zero if any probe fails, so it can gate a bake.
-import { readFileSync, openSync, readSync, closeSync, existsSync } from 'node:fs';
+import { readFileSync, openSync, readSync, closeSync, existsSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { coverHas, decodeDirectory, findTile } from './archive.mjs';
@@ -137,7 +137,42 @@ async function directoryFor(version, entry) {
  *   {kind:'uncovered'}                 — no published slice claims this ground
  *   {kind:'noindex'}                   — nothing published under this prefix at all
  */
+/**
+ * V4 IS NOT AN ARCHIVE AND WAS NEVER MEANT TO BE, so it is resolved the way it is actually
+ * published: one gzipped object per cell.
+ *
+ * This verifier was probing `v4/archive/index.json`, which has never existed. Every bake
+ * runs `R2_SKIP_V4=1` — v4 is COLOGRA's format, it is live on TestFlight, and the archive
+ * migration deliberately left it alone (Ausculta's client says so itself:
+ * `apps/mobile/src/tiles/archive.ts`, "v4 is Cologra's and is not fetched here";
+ * `ArchiveVersion = 'v5' | 'v5c'`). So all 25 v4 probes reported `noindex` — one of them
+ * printing "this probe proves nothing", which was the only honest line in the output.
+ *
+ * Twenty-five failures that mean "the verifier is looking in the wrong place" is worse than
+ * no check at all: it trains a reader to skim past the ones that mean something, and it is
+ * why a healthy publish looked broken.
+ *
+ * `absent` rather than `hole` or `uncovered` deliberately. A 404 in the object layout CANNOT
+ * distinguish "baked, empty cell" from "never baked" — that ambiguity is the documented
+ * 404 trap (CLAUDE.md: "Tile 404s cache for 5 minutes, not 30 days"), and closing it is one
+ * of the two structural wins the archive format was adopted for. Reporting one value for
+ * both is the truth about v4, and `judge` accepts it for either expectation while saying so.
+ */
+async function resolveObject(version, i, j) {
+  if (LOCAL) {
+    const f = join(LOCAL, version, String(i), `${j}.json.gz`);
+    if (!existsSync(f)) return { kind: 'absent' };
+    return { kind: 'tile', slice: '(object)', bytes: statSync(f).size, body: readFileSync(f) };
+  }
+  const res = await fetch(`${HOST}/${version}/${i}/${j}.json.gz`);
+  if (res.status === 404) return { kind: 'absent' };
+  if (!res.ok) throw new Error(`${version}/${i}/${j}.json.gz: HTTP ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  return { kind: 'tile', slice: '(object)', bytes: buf.length, body: buf };
+}
+
 async function resolveCell(version, i, j) {
+  if (version === 'v4') return resolveObject(version, i, j);
   const index = await archiveIndex(version);
   if (!index || !Array.isArray(index.slices)) return { kind: 'noindex' };
   const candidates = index.slices
@@ -350,6 +385,23 @@ const PROBES = [
   ['vermont', 'mid-Pacific', 30.0, -150.0, 'uncovered', ['v4', 'v5']],
 ];
 
+/**
+ * The slices that MUST be live. Everything else in `PROBES` is a trial bake whose probes are
+ * reported as skips rather than failures until somebody publishes it.
+ *
+ * DECLARED, NOT INFERRED, and that distinction is the whole point. Inferring "expected" from
+ * whatever the index happens to contain would mean a slice that VANISHED from the bucket
+ * silently downgraded from failing to skipped — the one regression this file exists to
+ * catch. So the list is written down: a slice named here and missing is a hard failure; a
+ * slice not named here and missing is a loud skip; publishing a trial slice means adding it
+ * here, which is one line and is the moment its probes start being enforced.
+ *
+ * `vermont` and `district-of-columbia` are the current trial bakes — used to measure archive
+ * overhead and landmark density (docs/PMTILES-SCOPING.md), never published. Eighteen of the
+ * thirty-three "failures" that made a healthy publish look broken were their probes.
+ */
+const EXPECTED_SLICES = new Set(['massachusetts', 'utah', 'kansas', 'arizona', 'florida']);
+
 const FLOORS = { ways: 200, named: 20, crossings: 50, ptsInCell: 100 };
 
 async function probe(ver, lat, lng) {
@@ -472,6 +524,10 @@ function judge(expect, ver, r, want) {
     // cell. `uncovered` is not good enough — it would pass for a slice that was never
     // published at all, which is exactly the vacuous pass this file exists to prevent.
     if (r.kind === 'hole') return bad;
+    // v4 cannot tell "baked and empty" from "never baked" — see `resolveObject`. Accepting
+    // the 404 here is not a loosened assertion, it is the honest limit of the object layout,
+    // and it is exactly the ambiguity the v5 archives removed.
+    if (r.kind === 'absent' && ver === 'v4') return bad;
     if (r.kind === 'uncovered') bad.push('no published slice covers this cell — expected a HOLE inside a covered slice');
     else if (r.kind === 'noindex') bad.push(`nothing published under ${ver}/archive/`);
     else bad.push(`expected a hole (baked, empty), got a ${r.bytes} B tile from ${r.slice}`);
@@ -479,6 +535,7 @@ function judge(expect, ver, r, want) {
   }
   if (expect === 'uncovered') {
     if (r.kind === 'uncovered') return bad;
+    if (r.kind === 'absent' && ver === 'v4') return bad; // same ambiguity, same honest limit
     if (r.kind === 'hole') bad.push(`slice ${r.slice} claims ground it does not own`);
     else if (r.kind === 'noindex') bad.push(`nothing published under ${ver}/archive/ — this probe proves nothing`);
     else bad.push(`a ${r.bytes} B tile exists here, served from ${r.slice}`);
@@ -486,6 +543,10 @@ function judge(expect, ver, r, want) {
   }
   if (r.kind === 'noindex') {
     bad.push(`nothing published under ${ver}/archive/`);
+    return bad;
+  }
+  if (r.kind === 'absent') {
+    bad.push(`no object at ${ver}/${r.i}/${r.j}.json.gz — this cell was expected to hold data`);
     return bad;
   }
   if (r.kind === 'uncovered') {
@@ -539,9 +600,19 @@ function judge(expect, ver, r, want) {
 
 const results = [];
 let failed = 0;
+let skipped = 0;
+const skippedSlices = new Set();
 
 for (const [slice, label, lat, lng, expect, versions, want] of PROBES) {
   if (onlySlice && slice !== onlySlice) continue;
+  // A trial slice nobody published is not a broken publish. `unbaked` is a PSEUDO-SLICE —
+  // its probes assert that ground nobody baked stays uncovered — so it is always enforced.
+  if (!EXPECTED_SLICES.has(slice) && slice !== 'unbaked') {
+    skipped += versions.length;
+    skippedSlices.add(slice);
+    if (!asJson) console.log(`skip ${slice}/${versions.join('+')} ${label} — not in EXPECTED_SLICES (trial bake, never published)`);
+    continue;
+  }
   for (const ver of versions) {
     const r = await probe(ver, lat, lng);
     const bad = judge(expect, ver, r, want);
@@ -567,6 +638,14 @@ for (const [slice, label, lat, lng, expect, versions, want] of PROBES) {
 }
 
 if (asJson) console.log(JSON.stringify({ host: LOCAL ? `file://${LOCAL}` : HOST, failed, results }, null, 2));
-else console.log(`\n${results.length - failed}/${results.length} probes passed against ${LOCAL ? `local pack ${LOCAL}` : HOST}`);
+else {
+  console.log(`\n${results.length - failed}/${results.length} probes passed against ${LOCAL ? `local pack ${LOCAL}` : HOST}`);
+  if (skipped > 0) {
+    console.log(
+      `${skipped} probe(s) skipped across ${skippedSlices.size} unpublished trial slice(s): ${[...skippedSlices].sort().join(', ')}` +
+        ` — add to EXPECTED_SLICES once published, and they become enforced.`,
+    );
+  }
+}
 
 process.exit(failed ? 1 : 0);
