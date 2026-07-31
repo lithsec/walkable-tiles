@@ -46,6 +46,8 @@ import { basename, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { coverHas, decodeDirectory, findTile } from './archive.mjs';
 
+import { FEAT_CHARS, classifyFeatures, decodeFeatures, displayClass } from './habitat.mjs';
+
 const args = process.argv.slice(2);
 const onlySlice = args.includes('--slice') ? args[args.indexOf('--slice') + 1] : null;
 const asJson = args.includes('--json');
@@ -178,7 +180,12 @@ async function resolveCell(version, i, j) {
 //                  at least one landmark must match every field given.
 //   want.attrWays  at least this many ways must carry `lit` or `access` (SPEC §10.6).
 //   want.habitatHas / want.habitatLacks
-//                  characters that must / must not appear in `habitat.cells` (SPEC §10.3).
+//                  class characters that must / must not appear in the cell's habitat grid
+//                  (SPEC §10.3). REVISION-AGNOSTIC on purpose: revision 3 ships a `cells`
+//                  string of class characters and revision 4 ships a `feat` string of
+//                  measurements, and the probe asserts the same claim about the GROUND
+//                  across both. A probe pinned to one encoding would go red at the re-bake
+//                  for a reason that has nothing to do with whether Provo is mountainous.
 //
 // Landmarks were deliberately NOT asserted before revision 2, because §10.2 capped them at
 // 3 per tile sorted by footprint and a legitimately dense cell can carry zero named parks.
@@ -385,13 +392,35 @@ async function probe(ver, lat, lng) {
     crossings: (tile.crossings ?? []).length,
     landcover: (tile.landcover ?? []).length,
     landmarks: tile.landmarks ?? [],
-    habitatCells: tile.habitat?.cells ?? '',
+    habitatCells: habitatChars(tile.habitat),
     // SPEC §10.6 — a way carries these only when OSM tagged them, so counting the ways
     // that have EITHER is the cheapest proof the channel exists at all.
     attrWays: ways.filter((w) => w.lit !== undefined || w.access !== undefined).length,
     ptsInCell,
     sampleName: (tile.names ?? []).find(Boolean) ?? null,
   };
+}
+
+/**
+ * One class character per spawn cell, whichever revision the tile is.
+ *
+ * Revision 4 carries `feat` — eight base64url characters of measurement — and the class is
+ * derived here by the same `habitat.mjs` the tiler and the app run; the DISPLAY class is
+ * used, so a wooded mountainside answers `m` exactly as first-match-wins used to. A cell
+ * carrying several classes therefore contributes one character, which is what a probe
+ * spelled `habitatHas: 'w'` means to check. Revision 3's `cells` is passed through.
+ */
+function habitatChars(h) {
+  if (!h) return '';
+  if (typeof h.cells === 'string') return h.cells;
+  if (typeof h.feat !== 'string') return '';
+  const CODE = { urban: 'u', residential: 'r', woodland: 'w', greenspace: 's', mountain: 'm', rural: '.', water: '~' };
+  let out = '';
+  for (let k = 0; k * FEAT_CHARS < h.feat.length; k++) {
+    const f = decodeFeatures(h.feat, k);
+    out += f === null ? '?' : CODE[displayClass(classifyFeatures(f))];
+  }
+  return out;
 }
 
 // Does any landmark in the tile match every field of `w`? Returns the reason it did not,

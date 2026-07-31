@@ -195,11 +195,49 @@ unchanged.
                  { "name": "Wichita", "lat": 37.6889, "lng": -97.3361, "kind": "city" },
                  { "name": "Mount Timpanogos", "lat": 40.3907, "lng": -111.6457,
                    "kind": "peak", "ele": 3581 }, … ],
-  "habitat":   { "cellDeg": 0.0015, "cx0": …, "cy0": …, "cols": 7, "rows": 8, "cells": "uur.ws…" }
+  "habitat":   { "cellDeg": 0.0015, "cx0": …, "cy0": …, "cols": 7, "rows": 8,
+                 "feat": "H_AAZAAAH_APAAoA…" }        // 8 base64url chars of MEASUREMENT per
+  //                                                     spawn cell; the CLASS is derived by
+  //                                                     the reader, never baked (§10.3)
 }
 ```
 
-### 10.0 Revision 2 (2026-07) — still `v: 5`, and why
+### 10.0 Revision 4 (2026-07-31) — the habitat grid stops carrying a CLASS
+
+**The one change in this format's history that is not purely additive, and the reason is that
+the thing being removed is a second source of truth.** Revisions 1–3 shipped `habitat.cells`,
+one class CHARACTER per spawn cell: the bake ran the classifier and published its answer.
+That made every threshold a property of the CDN. `mountain`'s radius and threshold each moved
+twice during one afternoon of calibration, and each move meant re-baking every slice — hours
+per state and real money — so in practice the rules were frozen by their deployment cost, and
+a class added later could only be seen by tiles baked after it.
+
+Revision 4 ships the MEASUREMENTS instead. `habitat.feat` carries **8 base64url characters per
+spawn cell** — way length by group, three 2×2 cover masks, and the regional relief — and
+§10.4's rules are applied by whoever reads it: the bake (for the sidecar and the atlas),
+Ausculta's client (`packages/content/src/habitat.ts`), and Ausculta's server (plpgsql, to
+re-derive a claim). **Adding a classifier no longer requires a re-bake.** Adding a
+MEASUREMENT still does, because that is new data rather than a new opinion, and that is the
+line the format holds.
+
+Three consequences, all stated rather than discovered:
+
+- **`cells` is gone, not kept alongside.** Keeping both would leave the bake's answer and the
+  reader's answer able to disagree about the same cell, which is exactly what revision 4
+  exists to end. A revision-3 client finds no `cells`, decodes nothing, and every cell falls
+  back to rural — the same quiet degradation the retired `g` already relies on, in the
+  direction that under-claims.
+- **The classifier is MULTI-LABEL** (§10.4). First-match-wins was a live bug: when `mountain`
+  landed it claimed first and Vermont's `woodland` fell from 3.8% of spawn cells to 1.4%,
+  taking most of a shipped woodland creature's habitat with it. A cell is now every class its
+  features earn, and the ordering argument disappears.
+- **`water` is the seventh class** (§10.4), which overflows the atlas's 6-bit mask; the atlas
+  goes to two characters per block and `v: 2` (§10.7).
+
+**Revision-3 tiles stay valid `v: 5`** and parse unchanged apart from the habitat grid, so
+the two revisions coexist on the CDN for as long as any slice goes un-rebaked.
+
+### 10.0.1 Revision 2 (2026-07) — still `v: 5`, and why
 
 Revision 2 adds eight landmark kinds (§10.2), an optional `ele` and an optional `anchor` on
 a landmark, two optional per-way attributes (§10.6), and **splits the `green` habitat class
@@ -385,7 +423,7 @@ order is unchanged from revision 1 (area descending), so the pre-existing kinds 
 relative ranking; distance replaces name as the first tiebreak, which is the only
 meaningful key for the zero-area point kinds.
 
-### 10.3 `habitat` — per-spawn-cell class grid
+### 10.3 `habitat` — per-spawn-cell FEATURE grid
 
 The grid is Ausculta's spawn-cell grid exactly: `cellDeg = 0.0015`
 (`cx = floor(lng/0.0015)`, `cy = floor(lat/0.0015)` — cx first, as in its
@@ -398,51 +436,88 @@ cy0 = floor(20·latIdx / 3)      cy1 = ceil(20·(latIdx+1) / 3) − 1     rows =
 cx0 = floor(20·lngIdx / 3)      cx1 = ceil(20·(lngIdx+1) / 3) − 1     cols = cx1−cx0+1  (7 or 8)
 ```
 
-`cells` is one character per spawn cell, `rows × cols` long, **row-major,
-south→north** (cy ascending is the outer loop), **west→east** (cx ascending)
-within a row: index `= (cy−cy0)·cols + (cx−cx0)`. Because 20/3 is not an integer, edge
-spawn cells straddle tile boundaries and appear in two (or four) tiles'
-grids — the class is a function of the cell alone, so overlapping tiles agree.
+`feat` is **8 base64url characters per spawn cell**, `rows × cols × 8` long, **row-major,
+south→north** (cy ascending is the outer loop), **west→east** (cx ascending) within a row:
+cell `(cx, cy)` starts at character `8 · ((cy−cy0)·cols + (cx−cx0))`. Because 20/3 is not an
+integer, edge spawn cells straddle tile boundaries and appear in two (or four) tiles' grids —
+the record is a function of the cell alone, so overlapping tiles agree byte for byte.
 
-Codes:
+This is deliberately the atlas's encoding (§10.7) one zoom in: a fixed number of base64url
+characters per slot of a dense raster, same alphabet, same row order, no separators. There is
+no second convention to learn and no parser to write — index arithmetic and a table lookup,
+in JS or in plpgsql.
 
-| char | class | |
+#### The feature record — 48 bits, normative
+
+Assembled as one 48-bit big-endian integer and written most-significant character first. It
+fits exactly in a JS double (< 2^53) and in a plpgsql `bigint`, so neither side needs a bignum
+or a byte buffer.
+
+| bits | field | encoding |
 |---|---|---|
-| `u` | urban | |
-| `r` | residential | |
-| `w` | woodland | revision 2 |
-| `s` | greenspace | revision 2 |
-| `.` | rural | the default |
-| `m` | mountain | revision 3 — regional relief from Copernicus GLO-30 (§10.4, §10.9) |
-| `g` | ~~green~~ | **RETIRED in revision 2.** Never re-spent. |
+| 47–45 | reserved | must be 0 |
+| 44–36 | `relief` | 9 bits, 10 m units, 0–510 ⇒ 0–5,100 m. **511 = NO DEM COVERAGE** |
+| 35–32 | `waterMask` | the cell's 2×2 cover samples inside a `water` landcover polygon |
+| 31–28 | `greenMask` | … inside a `green` polygon |
+| 27–24 | `woodMask` | … inside a `wood` polygon |
+| 23–16 | `road` | 8 bits, 10 m units, saturating at 2,550 m |
+| 15–8 | `foot` | 8 bits, 10 m units, saturating at 2,550 m |
+| 7–0 | `res` | 8 bits, 10 m units, saturating at 2,550 m |
 
-**`g` is retired, not reused, and that is a compatibility decision.** Revision 1's `g` meant
-"wood or green" and revision 2 splits that in two (§10.4). Re-spending the character would
-make a revision-1 tile and a revision-2 tile disagree about what `g` claims, and an old
-client would silently read every `greenspace` cell as woodland — a wrong answer where the
-whole grid's job is to be a right one.
+Sample bit order within a mask is the 2×2 grid of §10.4: bit 0 = (S, W), 1 = (S, E),
+2 = (N, W), 3 = (N, E).
 
-What each side sees across the boundary:
+Four decisions in that table, each load-bearing:
 
-- **An old client reading a revision-2 tile** decodes `w` and `p` as unknown characters.
-  Ausculta's `HABITAT_CODE` maps an unknown character to nothing and the cell falls back to
-  rural, so an old app reads every wooded or park cell as rural. That is quiet degradation
-  and correct abstention — it under-claims rather than mis-claims.
-- **A new client reading a revision-1 tile** does **not** map `g` to either successor. The
-  client's `HABITAT_CODE` omits it deliberately, so it decodes to nothing and the cell falls
-  back to rural: `g` might have meant either, and the whole reason for the split is that the
-  two are not interchangeable, so picking one would be exactly the fabrication the split
-  exists to end. Legacy cells go quiet rather than wrong. After this re-bake no tile on the
-  CDN contains `g` at all (all five live v5 slices are re-baked), so the only `g` left is in
-  on-device caches, for at most their 30-day TTL.
+- **511 is not 5,110 m.** An unmeasured cell is not a flat cell. A rule that reads relief must
+  abstain on the sentinel, never treat it as flat ground — the same contract §10.6's absent
+  `lit` has, and the same one that stopped `mountain` claiming ocean.
+- **MASKS, not counts, for the three cover fields.** The green gate is
+  `popcount(woodMask | greenMask)` — the UNION — which counts cannot reproduce: two wood
+  samples and two green samples cover anywhere from 2 to 4 of the cell's 4 samples depending
+  on WHICH ones. Masks cost the same 12 bits three 3-bit counts would and answer strictly more.
+- **Linear 10 m units, not a log scale.** A log scale gives constant relative precision and
+  costs fewer bits, and it is refused because the thresholds are absolute (120 m, 900 m, 500 m)
+  and must be exactly representable in every port: 120/10 and 900/10 are integers, so a cell
+  cannot straddle a threshold because JS and plpgsql rounded a logarithm differently in the
+  last bit. **The saturation point is 2,550 m of ONE way group inside a 167 m cell** — measured
+  on both trial slices, the largest anywhere is Vermont's 1,530 m of `foot` and the District's
+  2,400 m, and no cell in either reaches the ceiling.
+- **FLOOR, never round.** Every stored quantity is a LOWER BOUND on the truth. The absolute
+  gates are all `>=`, so quantisation can only refuse a class there, never grant one on
+  evidence the cell does not have. The SHARE gates are ratios of three independently floored
+  numbers and can move either way by up to one quantum each — measured, that moves **216 of
+  Vermont's 282,350** walkable cells and **126 of the District's 7,364** across any label at
+  all, and **no cell in either changes `mountain`**. Rounding instead of flooring moved 8,789
+  and 71, all of it upward, including 3,208 extra `mountain` cells.
 
-### 10.4 Habitat classifier — v3, normative
+**The rules are applied to the DECODED record**, never to the tiler's internal float. That is
+what makes the bake, the client and the plpgsql port classify identically by construction
+rather than by tolerance.
+
+`node scripts/habitat.mjs` is a live self-check of this table and of §10.4's rules, asserting
+on VALUES the way `dem.mjs` does — a record read one field short returns perfectly plausible
+numbers from the wrong offset, and `typeof f === 'object'` is true of an empty decode.
+
+**What revisions 1–3 carried instead.** `cells`, one character per spawn cell —
+`u` urban, `r` residential, `w` woodland, `s` greenspace, `m` mountain, `.` rural, and
+revision 1's retired `g`. A revision-4 reader that meets `cells` and no `feat` **must decode
+nothing**: mapping the characters back would reintroduce exactly the frozen classification
+this revision removes, and it cannot represent a multi-class cell at all. Those cells go
+quiet, which is the direction that under-claims.
+
+### 10.4 Habitat classifier — v4, normative, MULTI-LABEL
 
 The vocabulary is Ausculta's `packages/content/src/habitat.ts` exactly:
-`mountain | urban | residential | woodland | greenspace | rural`. Ausculta's server
+`mountain | water | urban | residential | woodland | greenspace | rural`. Ausculta's server
 re-derives spawns from these classes, so the classification must be reproducible from this
-spec + the OSM extract **and, since revision 3, one published elevation product** (§10.9).
-It is a pure function of three per-cell aggregates:
+spec + the OSM extract **and one published elevation product** (§10.9).
+
+**The rules are no longer in the bake alone.** Three implementations run them — the tiler's
+`scripts/habitat.mjs`, Ausculta's `packages/content/src/habitat.ts`, and the server's plpgsql
+— over the same 8 characters per cell (§10.3). This section is normative for all three.
+
+The bake's job is the three per-cell aggregates below, and only those:
 
 **Way length per group.** Each walkable-way segment (the same osmium-filtered
 ways v4 ships) is cut into `ceil(len/20 m)` equal steps and each step's length
@@ -464,46 +539,95 @@ polygon, `greenFrac` samples inside a `green` one, each / 4. A sample inside bot
 wooded corner of a park — sets both. `coverFrac` is the count of samples inside **either**,
 / 4, which is bit-for-bit revision 1's single `greenFrac`.
 
-Rules apply **in order**, first match wins (`all = foot + res + road`;
-thresholds are the `HAB` and `MOUNTAIN_*` constants in `tile.mjs`):
+**Every rule is evaluated INDEPENDENTLY and the result is the UNION** (`all = foot + res +
+road`, all lengths and `relief` read from the decoded record of §10.3):
 
-1. **mountain** if `all > 0` **and** `relief ≥ 500 m` — revision 3. `relief` is the
-   regional relief defined below; a missing relief never matches (abstention).
-2. **green family** if `coverFrac ≥ 0.5` **and** `foot > 0` — trackless forest is
-   rural; a wood with a path through it is walkable green. (Without the `foot`
-   guard, ~40% of Massachusetts' green cells were unreachable forest.)
-3. **urban** if `all ≥ 900 m` and `res/all ≤ 0.35`
-4. **green family** if `foot ≥ 120 m` and `foot/all ≥ 0.7`
-5. **residential** if `res ≥ 120 m` and `res/all ≥ 0.4`
-6. **rural** otherwise — including cells with no data at all (the default).
+- **nothing at all** if `all == 0` ⇒ `rural`, alone. Spawns snap to walkable ways, so a cell
+  with no walkable way places nothing, and classifying it would put a creature where nobody
+  can stand. One invariant stated once, where v3 stated it three times.
+- **mountain** if `relief ≥ 500 m`. A missing relief never matches — abstention, not a guess
+  that the ground is flat.
+- **water** if `waterFrac ≥ 0.25` **and** `foot > 0`.
+- **green family** if (`coverFrac ≥ 0.5` **and** `foot > 0`) **or** (`foot ≥ 120 m` **and**
+  `foot/all ≥ 0.7`) — trackless forest is rural; a wood with a path through it is walkable
+  green. (Without the `foot` guard, ~40% of Massachusetts' green cells were unreachable
+  forest.) Which member it is stays a PARTITION — see "Which green" below.
+- **urban** if `all ≥ 900 m` **and** `res/all ≤ 0.35`.
+- **residential** if `res ≥ 120 m` **and** `res/all ≥ 0.4`.
+- **rural** if and only if nothing above matched. `rural` is the ABSENCE of every other
+  class, so it is never a co-label and the mask is never empty.
 
-**Mountain claims first**, because regional relief is the coarsest and most stable fact
-about a cell: a wooded mountainside is a mountain and a lake in a corrie is a mountain. The
-finer classes describe what is ON the ground; this one describes the ground. The cost is
-stated rather than hidden — measured on the vermont trial bake, 2026-07-30, mountain takes
-cells from every other class and roughly halves the green family in a mountainous state:
+**FIRST-MATCH-WINS WAS A LIVE BUG.** Revision 3 ordered these and stopped at the first: when
+`mountain` was inserted at the top, Vermont's `woodland` fell from 3.8% of spawn cells to
+1.4%, and `skitter` — a shipped woodland creature — lost most of its Green Mountain habitat.
+Not because the ground changed, but because a class was inserted above it in a list. Real
+ground is a wooded mountainside. Once the data says so, the ordering argument disappears
+entirely: there is no order.
 
-| vermont, of 1,266,781 distinct spawn cells | before (revision 2) | after (revision 3) |
-|---|---|---|
-| rural | 90.4% | 86.2% |
-| **mountain** | — | **8.8%** |
-| residential | 4.5% | 2.7% |
-| woodland | 3.8% | 1.4% |
-| greenspace | 1.3% | 0.8% |
-| urban | 0.04% | 0.04% |
+Measured on the vermont trial bake, 2026-07-31 (`--trial`, nothing uploaded) — the LABEL
+share, which is what a creature's weight sees:
 
-The District of Columbia is a **strict no-op**: 38.4% rural / 30.9% urban / 12.4%
-greenspace / 9.3% woodland / 9.0% residential before and after, `mountain` 0.0%, and its
-v5 hash manifest is byte-identical across the change. Its 17 named "peaks" are 28–123 m
+| vermont, of 1,266,781 distinct spawn cells | rev 2 (no mountain) | rev 3 (first match) | **rev 4 (multi-label)** |
+|---|---|---|---|
+| rural | 90.4% | 86.2% | **86.2%** |
+| mountain | — | 8.8% | **8.8%** |
+| residential | 4.5% | 2.7% | **4.5%** |
+| woodland | 3.8% | 1.4% | **3.8%** |
+| greenspace | 1.3% | 0.8% | **1.3%** |
+| urban | 0.04% | 0.04% | **0.04%** |
+| water | — | — | **0.2%** |
+
+Every class the mountain rollout took from is exactly back where it was, and `mountain` is
+unchanged at 8.8%. 4.9% of Vermont's cells carry more than one class.
+
+The District of Columbia still reports **0.0% mountain** — its 17 named "peaks" are 28–123 m
 city hills and its highest regional relief anywhere is 144 m, a factor of 3.5 below the
-threshold — which is what makes it the sharpest available test that the rule does not
-over-claim.
+threshold, which is what makes it the sharpest available test that the rule does not
+over-claim. Its labels move where multi-label and `water` say they should: rural 38.4% →
+37.3%, urban 30.9% → 32.3%, greenspace 12.4% → 18.2%, woodland 9.3% → 9.4%, residential 9.0%
+→ 10.0%, water — → 3.8%.
 
-`all > 0` is the same guard as the green rule's `foot > 0`, at the strength this class
-needs. Spawns snap to walkable ways, so a cell with no walkable way of any kind places
-nothing, and classifying it would put a creature where nobody can stand. It is `all` and
-not `foot` because a mountain town has streets and a creature that lives there is welcome
-to them — that IS the "a city in the mountains counts" case.
+#### Display precedence — one plate, not 2^7 of them
+
+Multi-label is right for spawning and wrong for painting: the habitat album holds ONE plate
+per class and the map draws ONE ground texture per cell. So a **display order** picks the
+single class a multi-class cell shows, and it is display-only:
+
+> `mountain` > `water` > `woodland` > `greenspace` > `urban` > `residential` > `rural`
+
+Coarsest and most distinctive first. A wooded mountainside paints `mountain`, because that is
+what the player is standing in; a wooded lakeshore paints `water`, because the water is why
+anyone walks there. `rural` is last and is the floor. Seven classes stay seven plates.
+
+**How a creature's weight combines across a cell's classes is the MAXIMUM**, and that belongs
+here rather than only in the app because the server re-derives the same draw. The reason is
+monotonicity: adding a class to a cell must never REDUCE a creature's weight, or a classifier
+added years from now silently deletes an existing creature's habitat exactly as `mountain`
+just did. Product and mean both reintroduce the bug — under product a wooded mountainside
+multiplies a woodland creature's 2.0 by a mountain creature's 0.2 and the woodland creature is
+rarer there than in a car park.
+
+#### `water` means SHORELINE, never open water
+
+You cannot stand in a lake, and this bake already enforced it without knowing anything about
+water: spawns snap to walkable ways, so a cell that is all water has no ways and places
+nothing. The class therefore means *walkable ground beside water*, and the creature it
+justifies is found on the towpath, not in the canal.
+
+`waterFrac` is the same 2×2 sample grid the green rule uses, against the `water` landcover
+polygons of §10.1 — which have shipped since the first v5 bake; only the habitat layer never
+looked at them. The threshold is **lower than green's 0.5** because a shoreline cell is mostly
+land by definition: a cell that is half lake is a cell whose walkable part is a narrow strip,
+which is exactly the case worth naming. The `foot > 0` guard is the green rule's lesson
+repeated at the strength open water needs.
+
+**KNOWN GAP, deliberately open.** Narrow rivers, streams and canals are LINES in OSM
+(`waterway=river|stream|canal`) and this bake takes only mapped `riverbank` polygons, so a
+canal towpath — the most water-ish walk in Britain — does not classify. Closing it is new
+DATA rather than a new rule: it needs an osmium filter line, a buffer width to justify, and
+four more bits in the record, so unlike a threshold it costs a re-bake in whichever revision
+takes it. It should wait for a creature that actually needs a stream. The miss is a GAP —
+the cell reads as whatever else it is — and never a fabrication.
 
 #### Regional relief — normative, and the whole of the `mountain` rule
 
@@ -580,9 +704,9 @@ a plateau or a valley floor whose mountains are 10–15 km away, which is furthe
 
 **Where the DEM has no coverage, ABSTAIN — never guess.** The archive publishes no tile for
 open ocean and none above its northern limit. A cell whose OWN sample is missing has
-`relief = undefined` and rule 1 cannot match, so it falls through to rules 2–6 exactly as a
-revision-2 cell would; it is never `mountain` and never any other class it would not
-otherwise have been. A window that merely CLIPS a missing tile — every coastal mountain —
+`relief = null` (the 511 sentinel of §10.3) and the mountain rule cannot match, so the cell
+is whatever the other rules make it and exactly what a revision-2 cell would have been; it is
+never `mountain` and never any other class it would not otherwise have been. A window that merely CLIPS a missing tile — every coastal mountain —
 still has land in it and still has a relief, computed over the samples that exist. The two
 cases are different on purpose: an unmeasured cell is not a flat cell, but a partly
 unmeasured window is still a measured window.
@@ -591,8 +715,10 @@ The same rule covers a bake run with no elevation source at all (`DEM_DISABLE=1`
 relief is missing, no cell is `mountain`, and the bake prints a banner saying so, because
 "no mountains anywhere" and "no mountains here" are the same output and only one is true.
 
-**Which green.** Rules 1 and 3 select the *family*; this selects the member, and it is
-deliberately a separate question:
+**Which green.** The two green gates select the *family*; this selects the member. It stays
+a PARTITION rather than becoming two more independent labels, and that is the one place
+multi-label deliberately does not apply: the album paints one plate per class and "wooded AND
+open green" is not a place.
 
 > **`woodland`** if `woodFrac > 0` **and** `woodFrac ≥ greenFrac`; **`greenspace`**
 > otherwise.
@@ -608,21 +734,38 @@ large park. The reason that is not merely taste: §10.1's landcover precedence i
 resolves to `wood` at the polygon layer. Letting `greenspace` win here would leave the two
 layers disagreeing about the same square metre. Secondarily, tree cover is the more
 distinctive fact and the more specific claim, and it is the one somebody had to map
-explicitly. *This is a structural argument, not a measured one — no revision-2 bake has run,
-so the sample counts that would settle it empirically do not exist yet.*
+explicitly. *This is a structural argument, not a measured one.* What the trials do show is
+that neither half is starved: vermont runs 2.90 woodland to 1 greenspace and the District 0.52
+to 1, which is the two states' actual ground rather than a threshold artefact.
 
-With **no** cover evidence at all — rule 3, a trail-dominated cell with nothing mapped
+With **no** cover evidence at all — the path gate, a trail-dominated cell with nothing mapped
 around it — the answer is `greenspace`. `woodland` is a claim about tree cover and there is
 none to support it; `greenspace` is the weaker claim, which is the one to make when the
 evidence is absent.
 
-**Sidecar:** `out/habitat-<slice>.jsonl` — `class` is the full word
-(`"woodland"` / `"greenspace"`, not the grid character) — one line per **non-rural** cell
-(rural-as-default keeps it small), `{"cx":…,"cy":…,"class":"woodland"}`, sorted
-by `cy` then `cx`. The exactly-one-writer rule (§4) applies at spawn-cell
-granularity: a cell is emitted iff its center is inside the slice poly. (Tile
-habitat grids near slice borders may include cells classified from the
-extract's buffer geometry; the sidecar is the authoritative slice-owned set.)
+**Sidecar:** `out/habitat-<slice>.jsonl` — one line per owned spawn cell **that has any
+walkable way**, `{"cx":…,"cy":…,"f":"H_APAAoA","classes":["woodland"]}`, sorted by `cy` then
+`cx`. The exactly-one-writer rule (§4) applies at spawn-cell granularity: a cell is emitted
+iff its centre is inside the slice poly. (Tile habitat grids near slice borders may include
+cells classified from the extract's buffer geometry; the sidecar is the authoritative
+slice-owned set.)
+
+Three revision-4 changes to it, each with a reason:
+
+- **`f` is the row and `classes` is the convenience.** The server re-derives every spawn from
+  the rules above, so what it must store is the MEASUREMENT; a sidecar of class names would
+  need a re-bake the day a class is added, which is the cost this revision exists to remove.
+  `classes` is written beside it so an operator can read a line and so `inspect-bake.mjs` can
+  cross-check the atlas against something other than its own arithmetic.
+- **`class` (singular) is gone rather than widened.** A list under a singular key would be a
+  key changing meaning, which is the one thing §10.0 does not do.
+- **The gate is `all > 0`, not "non-rural".** "Non-rural" is a fact about today's rules — a
+  cell this bake calls rural is exactly the cell a new rule might want. `all > 0` is
+  structural: a cell with no walkable way places nothing under any rule anybody can write,
+  and it is the only thing that can be dropped without a guess. **The atlas obeys the same
+  gate**, which it did not before: a block whose only owned cells were trackless forest used
+  to set the atlas's `rural` bit, and the app would then point somebody at open country
+  40 km away that nobody can walk on.
 
 ### 10.5 Size budget
 
@@ -666,6 +809,32 @@ measurement after the first one:
   has no mountain and its anchor is unchanged, so the bake is byte-identical) and **10,442 of
   vermont's 28,445 (36.7%)**, of which 10,423 carry at least one `m`. A slice with no relief
   costs nothing to re-bake; a mountainous one costs a third of its tiles.
+
+- **Revision 4 (the feature grid) is the first habitat change that costs BYTES, and gzip
+  eats most of it.** Measured on both trial bakes, 2026-07-31, against a revision-3 bake of
+  the same extract. Uncompressed, the habitat block goes **126 B → 500 B** per tile — 8
+  base64url characters per spawn cell instead of 1, over the same 49–64 cells — so **+374 B**
+  of JSON. On the wire:
+
+  | slice | v5 tiles | total gz | p50 gz | habitat share of the payload |
+  |---|---|---|---|---|
+  | vermont, rev 3 | 28,445 | 146,156,824 B | 3,969 B | 0.58% |
+  | vermont, **rev 4** | 28,445 | **148,683,040 B** (+1.73%) | **4,051 B** (+82 B, +2.07%) | 2.25% |
+  | district-of-columbia, rev 3 | 188 | 15,231,598 B | 78,890 B | 0.02% |
+  | district-of-columbia, **rev 4** | 188 | **15,281,258 B** (+0.33%) | **79,219 B** (+329 B, +0.42%) | 0.10% |
+
+  **+82 B on a 4.0 KB rural tile and +329 B on a 79 KB city one**, against a pre-gzip cost of
+  374 B in both — the raster is highly repetitive (a cell with no ways and no cover is eight
+  identical characters) and deflate takes ~78% of it back in Vermont. Tile COUNTS are
+  unchanged in both slices, and **v4 and v5c are byte-identical** across the change: v4 never
+  saw the habitat grid and the coarse layer carries no habitat at all.
+
+  What is NOT free is the sidecar, and it is deliberate: **vermont 7.8 MB / 174,379 lines →
+  18.3 MB / 282,350 lines**, the District 228,848 B / 5,285 → 464,686 B / 7,364. Both changes
+  push the same way — the gate widened from "non-rural" to "has a walkable way", and the row
+  gained the record. It buys the property the whole revision is for: the server can classify a
+  cell under a rule that did not exist when the slice was baked. The atlas is tens of bytes
+  (§10.7).
 
 - **The anchor flag and sidecar (§10.8) are free.** Measured on the trial bakes,
   2026-07-30: `anchor: true` costs **+83 B** across the District's 188 v5 tiles and
@@ -751,8 +920,9 @@ of two, keeps the whole index in integers, and makes the atlas a strict coarseni
 *same* grid as §10.3 and §10.4 rather than a third coordinate system. The size is a trade
 against precision: bigger blocks are a smaller file and a vaguer "about 40 km north".
 
-**Encoding (normative).** One 6-bit class-occurrence mask per block, one **base64url**
-character per mask, over a **dense raster** of the slice's block bounding box:
+**Encoding (normative).** One class-occurrence mask per block, **`blockChars` base64url
+characters per mask** (2 as of atlas `v: 2`), over a **dense raster** of the slice's block
+bounding box, most-significant character first:
 
 | bit | value | class |
 |---|---|---|
@@ -762,24 +932,39 @@ character per mask, over a **dense raster** of the slice's block bounding box:
 | 3 | 8 | `greenspace` |
 | 4 | 16 | `mountain` — set as of revision 3 (§10.4) |
 | 5 | 32 | `rural` |
+| 6 | 64 | `water` — set as of revision 4 (§10.4) |
 
 ```jsonc
 {
-  "v": 1, "slice": "vermont",
-  "cellDeg": 0.0015, "blockCells": 64,
+  "v": 2, "slice": "vermont",
+  "cellDeg": 0.0015, "blockCells": 64, "blockChars": 2,
   "bx0": -765, "by0": 445, "cols": 21, "rows": 24,
-  "classes": ["urban","residential","woodland","greenspace","mountain","rural"],  // index i is bit 1<<i
-  "blocks": "…504 base64url characters…"
+  "classes": ["urban","residential","woodland","greenspace","mountain","rural","water"],  // index i is bit 1<<i
+  "blocks": "…1008 base64url characters…"
 }
 ```
 
-`blocks` is `rows × cols` characters, **row-major, south→north** (`by` ascending is the
-outer loop), **west→east** within a row — the same order as §10.3's per-cell grid, one zoom
-out, so there is no second convention to learn. Index `= (by−by0)·cols + (bx−bx0)`.
-Alphabet is `A–Z a–z 0–9 - _` at indices 0–63; base64url rather than standard base64
-because `-`/`_` need no escaping in a JSON string, a URL path or a shell, whereas a `/`
-invites a `\/` from a defensive encoder and the raster stops round-tripping byte-for-byte.
-Six bits is exactly the class vocabulary's width, so a mask never needs a second character.
+`blocks` is `rows × cols × blockChars` characters, **row-major, south→north** (`by` ascending
+is the outer loop), **west→east** within a row — the same order as §10.3's per-cell grid, one
+zoom out, so there is no second convention to learn. Block `(bx, by)` starts at character
+`blockChars · ((by−by0)·cols + (bx−bx0))`. Alphabet is `A–Z a–z 0–9 - _` at indices 0–63;
+base64url rather than standard base64 because `-`/`_` need no escaping in a JSON string, a
+URL path or a shell, whereas a `/` invites a `\/` from a defensive encoder and the raster
+stops round-tripping byte-for-byte.
+
+**TWO CHARACTERS, AND WHAT BROKE AT SEVEN CLASSES.** Six bits was exactly the class
+vocabulary's width, and `water` is the seventh. The bit that looks spendable is `rural` — the
+sidecar omits it — and it is not: **mask 0 means NO DATA**, so without an explicit rural bit
+the atlas cannot tell "90% of Vermont" from "that is the next state", which is the whole
+abstention contract below. So the slot widens to 12 bits. `blockChars` is written into the
+artifact rather than implied, because an inspector that hard-codes the width reads a v2 raster
+as twice as many blocks of nonsense and nothing looks wrong. Five bits are now spare, which
+makes the NEXT class free — the point of the exercise being that a class should not force an
+encoding change twice.
+
+**Measured cost, 2026-07-31 (`--trial`):** vermont **693 B → 1,220 B**, the District
+**209 B → 241 B**. It is one character per block plus a longer `classes` list; at ~1 KB for a
+state the absolute number is still the argument.
 
 Dense rather than a sparse `{blockKey: mask}` map: a JSON object entry costs ~20 B against
 1 B for a raster slot and a state's bbox is far more than 5% occupied (Vermont, a diagonal
@@ -793,20 +978,21 @@ A consumer that reads 0 as `rural` fabricates a wilderness out of a state line, 
 the same abstention failure §10.6's absent `lit` exists to prevent. Off-raster is the same
 answer as mask 0.
 
-**Derivation (normative).** From the **slice-owned spawn cells** — §4's exactly-one-writer
-rule at spawn-cell granularity, cell *centre* inside the slice poly — classified by §10.4,
-in the same pass that writes the habitat sidecar. **Never from the per-tile habitat
+**Derivation (normative).** From the **slice-owned spawn cells that have a walkable way** —
+§4's exactly-one-writer rule at spawn-cell granularity, cell *centre* inside the slice poly,
+`all > 0` — classified by §10.4, in the same pass and under the same gate as the habitat
+sidecar. A block's bit is set for every class ANY owned cell in it carries, which under
+multi-label means one wooded mountainside sets two. **Never from the per-tile habitat
 grids:** those include cells classified from the buffer geometry a Geofabrik extract
 carries from its neighbours, which reads Washington DC as 38% rural, a fact about Virginia
 and Maryland rather than about DC. A block's bit is set iff **at least one** owned cell in
 it has that class.
 
-The atlas records `rural`; the sidecar (§10.4) omits it. Not an inconsistency — the two pay
-for it differently. The sidecar is one *line* per cell and rural is the default, so listing
-it would multiply a 5 MB file by ten to say "nothing here". The atlas is a fixed-size
-raster where rural costs one *bit* that is already allocated, and without it the atlas could
-not answer "where is rural" at all — which in Vermont is 90% of the state and the single
-most likely habitat a player is standing in.
+The atlas and the sidecar record `rural` the same way as of revision 4 — the sidecar's
+`classes` list carries it, because its gate is now `all > 0` rather than "non-rural" (§10.4).
+That closes the one bit the cross-check below could never verify. It is also why Vermont's
+occupied-block count moved 346 → 345: one block's only owned cells were trackless forest, and
+"rural" was the wrong thing to say about ground nobody can walk on.
 
 **Occurrence, not dominance, and the noise floor that comes with it.** A bit means "at
 least one 167 m spawn cell", so one lone crossroads can make an 8 × 11 km block claim
@@ -819,12 +1005,19 @@ woodland creature be there at all"), and a threshold would silently delete real 
 woods. A consumer that needs confidence should prefer a class with a low thin-block ratio,
 or wait for a threshold to be specified.
 
-**Measured, revision 3 (2026-07-30, `--trial`, nothing uploaded):** vermont's raster is
-unchanged at 693 B — a mountain bit costs nothing, because the raster is dense and the bit
-was already allocated. 228 of vermont's 346 occupied blocks (65.9%) now claim `mountain`,
-against 226 for `woodland`; 3 of those rest on a single spawn cell (1.3%, the steadiest of
-any class — a 5 km relief window does not produce isolated cells the way one crossroads
-produces an isolated `urban`). The District claims `mountain` in **0** of its 6 blocks.
+**Measured, revision 4 (2026-07-31, `--trial`, nothing uploaded):** vermont's raster is
+1,220 B over 345 occupied blocks. Multi-label raises every class's block count, because a
+block no longer loses a class to whatever claimed its cells first: `residential` 292 → 339,
+`greenspace` 263 → 330, `woodland` 226 → 285, `urban` 42 → 60, `mountain` 228 unchanged, and
+`water` arrives in 258 (74.8%). `rural` falls 344 → 302, which is the `all > 0` gate refusing
+to call trackless forest open country. The noise floor is worth reading before trusting the
+new bit: **55 of the 258 water blocks (21.3%) rest on a single spawn cell**, second only to
+`urban`'s 31.7% — a mapped `riverbank` polygon with one path crossing it is a real answer and
+a thin one. The District claims `mountain` in **0** of its 6 blocks and `water` in all 6.
+
+**Measured, revision 3 (2026-07-30):** vermont's raster was 693 B — a mountain bit cost
+nothing, because the raster was dense and the bit was already allocated. 228 of vermont's 346
+occupied blocks (65.9%) claimed `mountain`, against 226 for `woodland`.
 
 **Measured, first bake (2026-07, `--trial`, nothing uploaded):**
 
@@ -842,14 +1035,17 @@ the feature's answer there is "you are already in it". Vermont is where it says 
 Burlington, Montpelier, Rutland and Brattleboro and absent from the blocks containing
 Mount Mansfield and Killington Peak, which both carry `woodland`.
 
-**Verification.** `inspect-bake.mjs` cross-checks the atlas against the habitat sidecar
-**by value**, block for block: every non-rural bit the sidecar's cells imply must be set in
-the atlas and no non-rural bit may be set without a sidecar cell backing it. `mountain` is
-inside that check as of revision 3 — it was skipped while the bit could only ever be 0, and
-leaving it skipped would have made the one new bit the only unverified one. An atlas built
-from the tile grids instead would disagree exactly at a state line, and `typeof atlas ===
-'object'` would never notice. Both trial slices report `AGREES — 0 missing bits, 0 unbacked
-bits, 0 sidecar blocks off-raster`.
+**Verification.** `inspect-bake.mjs` cross-checks the atlas against the habitat sidecar **by
+value**, block for block: every bit the sidecar's cells imply must be set in the atlas and no
+bit may be set without a sidecar cell backing it. The classes it checks are **re-derived from
+each sidecar row's `f`**, not read off its `classes` — so the check tests the rules rather
+than the tiler's memory of them, and a disagreement between the two fields is itself reported.
+`rural` is inside the check as of revision 4 (the sidecar now lists it) and `water` from its
+first bake; the mountain rollout is the argument for the latter — a brand-new bit is exactly
+the one whose verification must not be skipped "for now". An atlas built from the tile grids
+instead would disagree exactly at a state line, and `typeof atlas === 'object'` would never
+notice. Both trial slices report `AGREES — 0 missing bits, 0 unbacked bits, 0 sidecar blocks
+off-raster`.
 
 **How a client answers "where is the nearest woodland".** Read `blocks`, find your own
 block from your `(cx, cy)`, and walk outward in rings of increasing Chebyshev radius until

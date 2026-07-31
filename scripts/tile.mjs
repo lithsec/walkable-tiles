@@ -240,35 +240,19 @@ const LIT_NO = new Set(['no', 'disused']);
 // no, and a wrong restriction is as bad as a missing one.
 const ACCESS_KINDS = new Set(['private', 'no', 'permissive']);
 const HAB_STEP_M = 20; // way length is credited to spawn cells in steps of this size
-// Habitat classifier thresholds — v1, normative (SPEC.md §10.4). Rules apply IN ORDER.
-const HAB = {
-  GREEN_COVER_MIN: 0.5, //  1. woodland|greenspace: ≥ this fraction of the cell's 2x2 samples
-  //                                   covered by green OR wood landcover (the UNION, exactly
-  //                                   revision 1's test), AND any foot-group way present
-  //                                   (trackless forest is rural, a wood with a path through
-  //                                   it is walkable green). Which of the two it becomes is
-  //                                   a separate question — see greenKind().
-  URBAN_LEN_MIN: 900, //    2. urban: ≥ this many m of walkable way in the cell, and…
-  URBAN_RES_SHARE_MAX: 0.35, //        …residential share ≤ this
-  PATH_LEN_MIN: 120, //     3. woodland|greenspace: ≥ this many m of pure foot way, and…
-  PATH_SHARE_MIN: 0.7, //              …foot share ≥ this
-  RES_LEN_MIN: 120, //      4. residential: ≥ this many m of residential/living_street, and…
-  RES_SHARE_MIN: 0.4, //               …residential share ≥ this
-  //                        5. rural: everything else (the default — sidecar omits it)
-};
-// Grid characters (SPEC §10.3), matching Ausculta's HABITAT_CODE exactly.
+// Habitat classifier — THE RULES DO NOT LIVE HERE ANY MORE (SPEC.md §10.3, §10.4).
 //
-// `g` is RETIRED, not reused: revision 1's `g` meant "wood OR green" and revision 2 splits
-// that in two, so re-spending the character would make an old tile and a new tile disagree
-// about what `g` claims — a client would silently read every greenspace cell as woodland.
-// The client does not map `g` to either successor either; it decodes to nothing and the
-// cell falls back to rural. Legacy cells go quiet rather than wrong.
+// Revision 4 stopped baking a class and started baking the MEASUREMENTS. `scripts/habitat.mjs`
+// holds the feature record, every threshold and the multi-label rule; this file's job is to
+// produce the aggregates and write them. The reason is that a rule shipped as one character
+// per cell can only be changed by re-baking every slice — `mountain`'s radius and threshold
+// each moved twice in one afternoon of calibration — and a rule nobody can afford to change
+// is a rule nobody changes.
 //
-// `m` (mountain) is emitted as of 2026-07-30, from Copernicus GLO-30 regional relief
-// (dem.mjs, SPEC §10.4/§10.9). It was reserved and unemitted for one revision, and the
-// reservation cost nothing — which is the argument for reserving a character the day the
-// vocabulary declares it rather than the day the data arrives.
-const HAB_CODE = { urban: 'u', residential: 'r', woodland: 'w', greenspace: 's', mountain: 'm', rural: '.' };
+// The line between the two files is not "constants over there". A MEASUREMENT PARAMETER
+// stays here (MOUNTAIN_RELIEF_R_M below defines what the number in the record IS, so moving
+// it moves the data and costs a re-bake); an INTERPRETATION goes there (the 500 m threshold
+// is free to move, and has, twice).
 
 // ---- mountain: regional relief, not slope and not altitude (SPEC §10.4) ---------------
 //
@@ -302,7 +286,6 @@ const HAB_CODE = { urban: 'u', residential: 'r', woodland: 'w', greenspace: 's',
 // Flagstaff (270) and Kathmandu (455) fall below and are the honest cost: both sit on a
 // plateau or a valley floor whose mountains are 10–15 km out, which is further than a walk.
 const MOUNTAIN_RELIEF_R_M = 5000;
-const MOUNTAIN_RELIEF_MIN_M = 500;
 
 // ---- v5c: the COARSE landcover layer (SPEC §10.10) -----------------------------------
 //
@@ -367,17 +350,30 @@ const COARSE_ROUND = 5;
 // Ausculta's server re-derives from this spec in plpgsql, where a disagreement of one
 // block is a creature that spawns in the wrong state.
 const ATLAS_BLOCK_CELLS = 64;
-// One BIT per habitat class, one base64url CHARACTER per block. Six bits is exactly the
-// class vocabulary's width — including the `mountain` this bake reserves and does not
-// emit — so the mask never needs a second character. Key order here IS bit order, and is
-// what the artifact publishes as `classes`.
-const ATLAS_BIT = { urban: 1, residential: 2, woodland: 4, greenspace: 8, mountain: 16, rural: 32 };
-// base64url, not standard base64: `-`/`_` need no escaping anywhere the atlas travels
-// (JSON string, URL path, shell), whereas `/` invites a `\/` from a defensive encoder and
-// then the raster no longer round-trips byte-for-byte.
-const ATLAS_B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+// One BIT per habitat class, TWO base64url characters per block. The bit table is
+// `HABITAT_BIT` in scripts/habitat.mjs — one numbering shared with the per-cell grid rather
+// than a second one that has to be kept in step.
+//
+// TWO CHARACTERS, NOT ONE, AS OF `water` (atlas v2). Six bits was exactly the class
+// vocabulary's width and the seventh class overflows it. `rural` is not the bit to spend:
+// mask 0 means NO DATA — this slice owns no classified cell in that block — and without an
+// explicit rural bit the atlas cannot tell "90% of Vermont is rural" from "that is the next
+// state". So the slot widens to 12 bits, which leaves five spare and makes the NEXT class
+// free. Measured cost below in §10.7; it is tens of bytes.
+const ATLAS_CHARS = 2;
 
 // ---- args ----
+import {
+  B64,
+  FEAT_CHARS,
+  HABITAT_BIT,
+  HABITAT_CLASSES,
+  classifyFeatures,
+  classesOf,
+  decodeFeatures,
+  encodeFeatures,
+} from './habitat.mjs';
+
 const argv = process.argv.slice(2);
 const opt = (name) => {
   const i = argv.indexOf(name);
@@ -494,8 +490,9 @@ const anchorCands = new Map(); // anchorKey -> { key, kind, lat, lng, ele, sig, 
 //                                is listed from every tile that reaches it; it is a
 //                                candidate exactly once.
 const hab = new Map(); // `${cx}:${cy}` (Ausculta cellId order: cx=lng, cy=lat) ->
-//                        { foot, res, road, wmask, gmask } — meters per way group + the
-//                        2x2 cover-sample bits, wood and green kept APART (SPEC §10.4)
+//                        { foot, res, road, wmask, gmask, amask } — meters per way group +
+//                        the 2x2 cover-sample bits, wood / green / water kept APART. These
+//                        ARE the feature record of SPEC §10.4; nothing else is measured.
 
 function landcoverClass(pr) {
   // Precedence when a feature carries tags from several classes: LC_CLASSES order.
@@ -791,12 +788,15 @@ function binLandcover(idx) {
 
 function habCell(cx, cy) {
   const k = cx + ':' + cy;
-  // wmask / gmask: the 2x2 sample bits covered by `wood` and by `green` landcover
-  // respectively. Revision 1 kept one shared `mask`, which is the whole reason a deep
-  // forest and a municipal park collapsed into one class: the tiler HAS the distinction at
-  // the landcover layer (LC_CLASSES separates them) and threw it away here.
+  // wmask / gmask / amask: the 2x2 sample bits covered by `wood`, by `green` and by
+  // `water` landcover respectively. Revision 1 kept one shared `mask`, which is the whole
+  // reason a deep forest and a municipal park collapsed into one class: the tiler HAS the
+  // distinction at the landcover layer (LC_CLASSES separates all four kinds) and threw it
+  // away here. `amask` is revision 4's addition and it was the same oversight — the
+  // `water` polygons have shipped in `landcover` since the first v5 bake and the habitat
+  // layer simply never looked at them.
   let st = hab.get(k);
-  if (!st) hab.set(k, (st = { foot: 0, res: 0, road: 0, wmask: 0, gmask: 0 }));
+  if (!st) hab.set(k, (st = { foot: 0, res: 0, road: 0, wmask: 0, gmask: 0, amask: 0 }));
   return st;
 }
 
@@ -823,8 +823,10 @@ function habAddWay(points, hw) {
 
 // Mark each spawn cell's 2x2 samples (at 0.25/0.75 of the cell in each axis) covered by
 // this polygon — scanline over all rings, even-odd (holes work). `field` selects which
-// mask: 'wmask' for a `wood` polygon, 'gmask' for a `green` one. A sample inside both a
-// wood and a park sets both bits, which is what lets greenKind() see the overlap.
+// mask: 'wmask' for a `wood` polygon, 'gmask' for a `green` one, 'amask' for `water`. A
+// sample inside both a wood and a park sets both bits, which is what lets greenKind() see
+// the overlap — and a sample inside both a lake and a park sets both, which is what lets a
+// wooded lakeshore be BOTH classes now that the labels no longer compete.
 function rasterizeCover(rings, field) {
   let minLat = Infinity, maxLat = -Infinity;
   for (const r of rings)
@@ -895,6 +897,7 @@ function addArea(g, cls, kind, name, pr) {
       binLandcover(idx);
       if (cls === 'wood') rasterizeCover(kept, 'wmask');
       else if (cls === 'green') rasterizeCover(kept, 'gmask');
+      else if (cls === 'water') rasterizeCover(kept, 'amask');
     }
   }
   if (kind && name && best) {
@@ -1109,58 +1112,49 @@ function buildLandmarks(i, j, list) {
   return out;
 }
 
-const bits = (m) => (m & 1) + ((m >> 1) & 1) + ((m >> 2) & 1) + ((m >> 3) & 1);
-
-// Which of the two green-family classes a cell is, ONCE something has decided it is one.
-// Deliberately a separate question from the gate: the split is a PARTITION of revision 1's
-// `green`, never a redrawing of its boundary, so no cell moves in or out of the family.
+// One spawn cell's FEATURE RECORD — the measurements, quantised exactly as SPEC §10.4
+// specifies, with the rules applied to the QUANTISED values and never to these floats.
+// That is what makes the tiler, the client and the plpgsql port classify identically by
+// construction rather than by tolerance.
 //
-// woodland wins a tie (a wooded corner of a large park — the real case) for two reasons.
-// The one that is not taste: §10.1's landcover precedence is already `water > wood > green`,
-// so a polygon carrying both `natural=wood` and `leisure=park` ALREADY resolves to `wood`.
-// Letting greenspace win here would make the two layers disagree about the same square
-// metre. The other: tree cover is the more distinctive fact, and the more specific claim
-// is the one that had to be explicitly mapped.
-//
-// With NO cover evidence at all (the path rule below), greenspace is the answer, because
-// woodland is a claim about tree cover and there is none to support it.
-function greenKind(st) {
-  const w = bits(st.wmask);
-  return w > 0 && w >= bits(st.gmask) ? 'woodland' : 'greenspace';
+// Relief is read for EVERY cell, including cells with no walkable way. It is a fact about
+// the ground rather than about the ways, it is the one field a phone cannot recompute, and
+// a future rule that wants it on a cell today's rules ignore should not need a re-bake to
+// get it. `null` (encoded as the 511 sentinel) means the DEM publishes nothing here, which
+// is not the same claim as 0 m.
+function featuresAt(cx, cy) {
+  const st = hab.get(cx + ':' + cy);
+  const relief = reliefGrid === null ? null : reliefGrid.at(cx, cy);
+  return {
+    res: st ? st.res : 0,
+    foot: st ? st.foot : 0,
+    road: st ? st.road : 0,
+    woodMask: st ? st.wmask : 0,
+    greenMask: st ? st.gmask : 0,
+    waterMask: st ? st.amask : 0,
+    reliefM: relief === null || !Number.isFinite(relief) ? null : relief,
+  };
 }
 
-// Habitat class of one spawn cell — v3 rules, IN ORDER (normative — SPEC.md §10.4).
-function classifyHabitat(cx, cy) {
-  const st = hab.get(cx + ':' + cy);
-  if (!st) return 'rural';
-  const all = st.foot + st.res + st.road;
-  // 0. MOUNTAIN, and it claims first because regional relief is the coarsest and most
-  //    stable fact about a cell: a wooded mountainside is a mountain, and a lake in a
-  //    corrie is a mountain. The finer classes describe what is ON the ground; this one
-  //    describes the ground.
-  //
-  //    `all > 0` is the same guard the green rule's `foot > 0` is, at the strength this
-  //    class needs. Spawns snap to walkable ways, so a cell with no walkable way of any
-  //    kind places nothing and classifying it would put a creature where nobody can
-  //    stand — the lesson from ~40% of Massachusetts' green cells being trackless forest.
-  //    It is `all` and not `foot` because a mountain town has streets and a creature that
-  //    lives there is welcome to them; that IS the "a city in the mountains counts" case.
-  //
-  //    A NaN relief — no DEM coverage, or no elevation pass at all — is false against
-  //    `>=`, so the cell falls through to the rules below. Abstention, not a guess.
-  if (all > 0 && reliefGrid !== null && reliefGrid.at(cx, cy) >= MOUNTAIN_RELIEF_MIN_M) return 'mountain';
-  // The green GATE is the union of the two masks — bit-identical to revision 1's single
-  // mask, so exactly the same cells enter the green family as before.
-  const coverFrac = bits(st.wmask | st.gmask) / 4;
-  if (coverFrac >= HAB.GREEN_COVER_MIN && st.foot > 0) return greenKind(st);
-  if (all >= HAB.URBAN_LEN_MIN && st.res / all <= HAB.URBAN_RES_SHARE_MAX) return 'urban';
-  if (st.foot >= HAB.PATH_LEN_MIN && st.foot / all >= HAB.PATH_SHARE_MIN) return greenKind(st);
-  if (st.res >= HAB.RES_LEN_MIN && st.res / all >= HAB.RES_SHARE_MIN) return 'residential';
-  return 'rural';
+/** This cell's class MASK — multi-label, from the record as it will be READ, not as it was
+ *  measured. Going through encode/decode is deliberate: the sidecar, the atlas and the
+ *  client must all be classifying the same eight characters. */
+function habitatMask(cx, cy) {
+  return classifyFeatures(decodeFeatures(encodeFeatures(featuresAt(cx, cy))));
 }
 
 // Per-tile habitat block: every spawn cell intersecting the tile's 0.01° extent,
-// row-major, south→north rows (cy ascending), west→east within a row (cx ascending).
+// row-major, south→north rows (cy ascending), west→east within a row (cx ascending) —
+// unchanged from revision 3. What changed is the payload per slot: `cells`, one class
+// character, is GONE, and `feat` carries FEAT_CHARS base64url characters of measurement.
+//
+// `cells` is removed rather than kept alongside, and that is the one non-additive change
+// in this format's history. Keeping both would leave two sources of truth for the same
+// cell's class — the bake's answer and the client's — and the entire point of revision 4
+// is that the client stops trusting a character somebody else's thresholds chose. A
+// revision-3 client finds no `cells`, decodes nothing, and every cell falls back to rural:
+// the same quiet degradation `w`/`s`/`m` already rely on, in the direction that
+// under-claims.
 function buildHabitat(i, j) {
   const cy0 = Math.floor((i * CELL_RATIO_N) / CELL_RATIO_D);
   const cy1 = Math.ceil(((i + 1) * CELL_RATIO_N) / CELL_RATIO_D) - 1;
@@ -1168,8 +1162,8 @@ function buildHabitat(i, j) {
   const cx1 = Math.ceil(((j + 1) * CELL_RATIO_N) / CELL_RATIO_D) - 1;
   let s = '';
   for (let cy = cy0; cy <= cy1; cy++)
-    for (let cx = cx0; cx <= cx1; cx++) s += HAB_CODE[classifyHabitat(cx, cy)];
-  return { cellDeg: CELL_DEG, cx0, cy0, cols: cx1 - cx0 + 1, rows: cy1 - cy0 + 1, cells: s };
+    for (let cx = cx0; cx <= cx1; cx++) s += encodeFeatures(featuresAt(cx, cy));
+  return { cellDeg: CELL_DEG, cx0, cy0, cols: cx1 - cx0 + 1, rows: cy1 - cy0 + 1, feat: s };
 }
 
 // Area of the slice's ownership polygon, in km². Same scanline and the same even-odd rule
@@ -1534,12 +1528,37 @@ writeFileSync(
 // artifacts must use it, and neither may be derived from the per-tile habitat grids, which
 // include cells classified from the buffer geometry a Geofabrik extract carries from its
 // neighbours — reading DC off the grids said 38% rural, which is not a fact about DC.
+// A one-off audit, gated off: how many cells the 10 m / 10 m QUANTISATION moves across a
+// threshold, against classifying the tiler's own floats. Reported once and kept because the
+// number is the honest cost of a fixed-width record, and it is the first thing to re-measure
+// if a threshold ever lands near a quantum.
+const QUANT_AUDIT = process.env.HAB_QUANT_AUDIT === '1';
+let quantMoved = 0;
+const quantBy = new Map();
+
 const sidecar = [];
-const atlas = new Map(); // `${bx}:${by}` -> class-occurrence mask (ATLAS_BIT)
+const atlas = new Map(); // `${bx}:${by}` -> class-occurrence mask (HABITAT_BIT)
 for (const k of hab.keys()) {
   const [cx, cy] = k.split(':').map(Number);
   if (!ownsLatLng((cy + 0.5) * CELL_DEG, (cx + 0.5) * CELL_DEG)) continue;
-  const cls = classifyHabitat(cx, cy);
+  const feat = encodeFeatures(featuresAt(cx, cy));
+  const dec = decodeFeatures(feat);
+  // ONE GATE FOR BOTH ARTIFACTS, and it is `all > 0` rather than "non-rural".
+  //
+  // "Non-rural" is a fact about TODAY's rules — a cell this bake calls rural is exactly the
+  // cell a new rule might want, and omitting it would put back the re-bake revision 4 exists
+  // to remove. `all > 0` is structural instead: spawns snap to walkable ways, so a cell with
+  // no walkable way places nothing under any rule anybody can write, and it is the only
+  // thing that can be dropped without a guess.
+  //
+  // The ATLAS obeys it too, which it did not before. A block whose only owned cells are
+  // trackless forest used to set the atlas's `rural` bit, and the app would then tell
+  // somebody there is open country 40 km east of ground nobody can walk on. Mask 0 means NO
+  // DATA and that is the truthful answer there. It also makes the two artifacts the same
+  // set again, which is what lets inspect-bake's cross-check be total.
+  if (dec.res + dec.foot + dec.road === 0) continue;
+  const mask = classifyFeatures(dec);
+  const classes = classesOf(mask);
   // The ATLAS records rural; the sidecar (below) omits it. Not an inconsistency — the two
   // pay for it differently. The sidecar is one LINE per cell and rural is the default, so
   // listing it would multiply a 5 MB file by ten to say "nothing here". The atlas is a
@@ -1547,17 +1566,34 @@ for (const k of hab.keys()) {
   // the atlas could not answer "where is rural" at all — which in Vermont is 90% of the
   // state and the single most likely habitat a player is standing in.
   const ak = Math.floor(cx / ATLAS_BLOCK_CELLS) + ':' + Math.floor(cy / ATLAS_BLOCK_CELLS);
-  atlas.set(ak, (atlas.get(ak) ?? 0) | ATLAS_BIT[cls]);
-  if (cls === 'rural') continue;
-  sidecar.push({ cx, cy, cls });
+  atlas.set(ak, (atlas.get(ak) ?? 0) | mask);
+  sidecar.push({ cx, cy, feat, classes });
+  if (QUANT_AUDIT) {
+    const exact = classifyFeatures({ ...featuresAt(cx, cy), relief: featuresAt(cx, cy).reliefM });
+    if (exact !== mask) {
+      quantMoved++;
+      for (const c of HABITAT_CLASSES) {
+        const a = (exact & HABITAT_BIT[c]) !== 0, b = (mask & HABITAT_BIT[c]) !== 0;
+        if (a !== b) quantBy.set(c, (quantBy.get(c) ?? 0) + (b ? 1 : -1));
+      }
+    }
+  }
 }
 
-// Habitat sidecar: one line per OWNED non-rural spawn cell (rural is the default,
-// so omitting it keeps the file small). Sorted by cy, then cx — deterministic.
+// Habitat sidecar: one line per OWNED spawn cell that has any walkable way. Sorted by cy,
+// then cx — deterministic.
+//
+// `f` IS THE ROW AND `classes` IS THE CONVENIENCE. The server re-derives every spawn from
+// the same rules the client runs (SPEC §10.4), so what it has to store is the measurement;
+// `classes` is written beside it so an operator can read a line, and so `inspect-bake.mjs`
+// can cross-check the atlas against something other than its own arithmetic. `class`
+// (singular) is gone rather than widened — a list under a singular key would be a key
+// changing meaning, which is the one thing §10.0 does not do.
 sidecar.sort((a, b) => a.cy - b.cy || a.cx - b.cx);
 writeFileSync(
   join(OUT, `habitat-${SLICE}.jsonl`),
-  sidecar.map((s) => JSON.stringify({ cx: s.cx, cy: s.cy, class: s.cls })).join('\n') + (sidecar.length ? '\n' : ''),
+  sidecar.map((s) => JSON.stringify({ cx: s.cx, cy: s.cy, f: s.feat, classes: s.classes })).join('\n') +
+    (sidecar.length ? '\n' : ''),
 );
 
 // Habitat atlas: a DENSE raster over the slice's block bounding box, row-major
@@ -1587,26 +1623,35 @@ const aCols = hasBlocks ? bx1 - bx0 + 1 : 0;
 const aRows = hasBlocks ? by1 - by0 + 1 : 0;
 let blocks = '';
 for (let by = by0; by <= by1; by++)
-  for (let bx = bx0; bx <= bx1; bx++) blocks += ATLAS_B64[atlas.get(bx + ':' + by) ?? 0];
+  for (let bx = bx0; bx <= bx1; bx++) {
+    const m = atlas.get(bx + ':' + by) ?? 0;
+    blocks += B64[(m >> 6) & 63] + B64[m & 63]; // most significant character first
+  }
 writeFileSync(
   join(OUT, `atlas-${SLICE}.json`),
   JSON.stringify({
-    v: 1,
+    v: 2, // 2: two characters per block, and `water` at bit 6 (SPEC §10.7)
     slice: SLICE,
     cellDeg: CELL_DEG,
     blockCells: ATLAS_BLOCK_CELLS,
+    blockChars: ATLAS_CHARS,
     bx0: hasBlocks ? bx0 : 0,
     by0: hasBlocks ? by0 : 0,
     cols: aCols,
     rows: aRows,
-    classes: Object.keys(ATLAS_BIT), // index i is bit (1 << i) — bit order is key order
+    classes: HABITAT_CLASSES, // index i is bit (1 << i) — bit order is key order
     blocks,
   }) + '\n',
 );
 
+if (QUANT_AUDIT)
+  console.error(
+    `[tile] quantisation: ${quantMoved} of ${sidecar.length} walkable cells change mask; ` +
+      [...quantBy].map(([c, n]) => `${c} ${n > 0 ? '+' : ''}${n}`).join(', '),
+  );
 console.error(
   `[tile] v5: ${written5} tiles, ${lcPolys.length} landcover polys, ` +
-    `${sidecar.length} non-rural habitat cells -> ${OUT}/v5, ${OUT}/habitat-${SLICE}.jsonl; ` +
+    `${sidecar.length} walkable habitat cells -> ${OUT}/v5, ${OUT}/habitat-${SLICE}.jsonl; ` +
     `atlas ${atlas.size} blocks in a ${aCols}x${aRows} raster -> ${OUT}/atlas-${SLICE}.json`,
 );
 console.error(

@@ -18,6 +18,16 @@ import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { gunzipSync } from 'node:zlib';
 
+import {
+  B64,
+  FEAT_CHARS,
+  HABITAT_BIT,
+  classifyFeatures,
+  classesOf,
+  decodeFeatures,
+  displayClass,
+} from './habitat.mjs';
+
 const outDir = path.resolve(process.argv[2] ?? 'out');
 const v5 = path.join(outDir, 'v5');
 if (!existsSync(v5)) {
@@ -41,13 +51,16 @@ function* tiles(dir) {
 const TILE_DEG = 0.01;
 const M_PER_DEG_LAT = 111320;
 
-const HABITAT_NAME = { u: 'urban', r: 'residential', w: 'woodland', s: 'greenspace', m: 'mountain', '.': 'rural' };
+const HABITAT_NAMES = Object.keys(HABITAT_BIT);
 // Named summits, for the peak-prominence report below. `ele` is what the tile SHIPS (the
 // OSM tag); the score that ranks it is local drop from the DEM (SPEC §10.8), and the two
 // disagreeing is the entire point of revision 3 — so both are printed side by side.
 const peakEles = [];
 
-const habitat = new Map();
+const habitat = new Map(); // cell -> class MASK (multi-label, SPEC §10.4)
+const featSat = { res: 0, foot: 0, road: 0 }; // cells at the 2,550 m quantisation ceiling
+let featMax = { res: 0, foot: 0, road: 0, relief: 0 };
+let reliefMissing = 0;
 const landmarkKinds = new Map();
 // Landmark counts have to be reported in TWO columns and the first one is a trap. A
 // landmark is listed from every tile proximity or containment reaches, so "the District has
@@ -68,7 +81,8 @@ let waysTotal = 0;
 let waysLit = 0;
 let waysAccess = 0;
 let withEle = 0;
-let unknownCodes = new Set();
+let malformedFeat = 0;
+let legacyCellsGrids = 0;
 
 /** `<root>/<i>/<j>.json.gz` -> `i:j`, the cell key both hash manifests use. */
 function cellKeyOf(root, file) {
@@ -101,24 +115,50 @@ for (const f of tiles(v5)) {
     if (lm.anchor === true) flaggedAnchors.set(ak, lm);
     if (namedLandmarks.length < 4000) namedLandmarks.push(lm);
   }
-  // The habitat grid is one character per spawn cell. Cells straddle tile edges and appear
-  // in up to four tiles, so count DISTINCT cells rather than characters or the overlap
-  // inflates whichever classes happen to sit on a boundary.
+  // The habitat grid is FEAT_CHARS base64url characters of MEASUREMENT per spawn cell
+  // (SPEC §10.3); the class is derived here, by the same `scripts/habitat.mjs` the tiler and
+  // the client run. Cells straddle tile edges and appear in up to four tiles, so count
+  // DISTINCT cells rather than characters or the overlap inflates whichever classes happen
+  // to sit on a boundary.
   const h = d.habitat;
-  if (h?.cells) {
+  if (h?.cells) legacyCellsGrids++;
+  if (h?.feat) {
     for (let dy = 0; dy < h.rows; dy++) {
       for (let dx = 0; dx < h.cols; dx++) {
-        const code = h.cells[dy * h.cols + dx];
-        const name = HABITAT_NAME[code];
-        if (!name) { unknownCodes.add(code); continue; }
-        habitat.set(`${h.cx0 + dx}:${h.cy0 + dy}`, name);
+        const f = decodeFeatures(h.feat, dy * h.cols + dx);
+        if (f === null) { malformedFeat++; continue; }
+        habitat.set(`${h.cx0 + dx}:${h.cy0 + dy}`, classifyFeatures(f));
+        // The quantisation ceilings, reported rather than assumed. 8 bits at 10 m saturates
+        // at 2,550 m of one way group inside a 167 m cell; if a real slice ever reaches it
+        // the encoding is wrong and this is the line that says so.
+        if (f.res >= 2550) featSat.res++;
+        if (f.foot >= 2550) featSat.foot++;
+        if (f.road >= 2550) featSat.road++;
+        if (f.res > featMax.res) featMax.res = f.res;
+        if (f.foot > featMax.foot) featMax.foot = f.foot;
+        if (f.road > featMax.road) featMax.road = f.road;
+        if (f.relief === null) reliefMissing++;
+        else if (f.relief > featMax.relief) featMax.relief = f.relief;
       }
     }
   }
 }
 
+// TWO tables, because multi-label makes them different questions. `counts` is the LABEL
+// share — how many cells carry each class at all, which is what a creature's weight sees.
+// `display` is what one plate per cell would say (SPEC §10.4's display precedence), which
+// is what the map paints. Under first-match-wins these were the same number; they are not
+// any more, and reporting only one of them is how the woodland collapse hid for a day.
 const counts = new Map();
-for (const cls of habitat.values()) counts.set(cls, (counts.get(cls) ?? 0) + 1);
+const display = new Map();
+let multi = 0;
+for (const mask of habitat.values()) {
+  const cs = classesOf(mask);
+  if (cs.length > 1) multi++;
+  for (const cls of cs) counts.set(cls, (counts.get(cls) ?? 0) + 1);
+  const d = displayClass(mask);
+  display.set(d, (display.get(d) ?? 0) + 1);
+}
 const cells = habitat.size;
 
 const pct = (n, d) => (d === 0 ? '  —  ' : `${((100 * n) / d).toFixed(1)}%`.padStart(6));
@@ -131,8 +171,19 @@ const at = (xs, p) => (xs.length ? xs[Math.min(xs.length - 1, Math.floor(p * xs.
 
 console.log(`\n${tileCount} v5 tiles in ${path.relative(process.cwd(), outDir)}\n`);
 
-console.log(`── habitat classes, over ${cells.toLocaleString()} DISTINCT spawn cells ──`);
+console.log(`── habitat LABELS, over ${cells.toLocaleString()} DISTINCT spawn cells ──`);
+console.log('  (multi-label: a cell is every class its features earn, so these sum past 100%)');
 for (const [k, n] of [...counts].sort((a, b) => b[1] - a[1])) console.log(row(k, n, cells));
+console.log(`\n  ${multi.toLocaleString()} cells carry more than one class (${pct(multi, cells).trim()})`);
+console.log(`\n── the DISPLAY class (one plate per cell, SPEC §10.4 precedence) ──`);
+for (const [k, n] of [...display].sort((a, b) => b[1] - a[1])) console.log(row(k, n, cells));
+console.log(`\n── feature record, ${FEAT_CHARS} base64url chars per cell ──`);
+console.log(`  max in this slice: res ${featMax.res} m, foot ${featMax.foot} m, road ${featMax.road} m ` +
+  `(ceiling 2550), relief ${featMax.relief} m (ceiling 5100)`);
+console.log(`  cells at a length ceiling: res ${featSat.res}, foot ${featSat.foot}, road ${featSat.road}`);
+console.log(`  cells with NO DEM coverage (relief abstains): ${reliefMissing.toLocaleString()}`);
+if (malformedFeat) console.log(`  !! ${malformedFeat} malformed feature records`);
+if (legacyCellsGrids) console.log(`  !! ${legacyCellsGrids} tiles still carry a revision-3 \`cells\` grid`);
 if (!counts.has('woodland') || !counts.has('greenspace')) {
   console.log('\n  !! one half of the green split is EMPTY — that is the thing to look at.');
 } else {
@@ -142,10 +193,7 @@ if (!counts.has('woodland') || !counts.has('greenspace')) {
   console.log('  Both non-zero is necessary, not sufficient — a 50:1 ratio would say the');
   console.log('  threshold is wrong even though nothing is technically broken.');
 }
-if (unknownCodes.size > 0) {
-  console.log(`\n  !! grid characters this inspector does not know: ${[...unknownCodes].join(' ')}`);
-  console.log('     A legacy `g` here means the tiler was not re-run.');
-}
+
 
 reportAtlas();
 reportCoarse();
@@ -399,7 +447,6 @@ function reportCoarse() {
 // geometry) would disagree exactly at the state line, and `typeof atlas === 'object'`
 // would never notice.
 function reportAtlas() {
-  const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
   const files = readdirSync(outDir).filter((f) => f.startsWith('atlas-') && f.endsWith('.json'));
   if (files.length === 0) {
     console.log('── habitat atlas ──\n  no atlas-<slice>.json in this out dir (tiler not re-run?)\n');
@@ -410,7 +457,17 @@ function reportAtlas() {
     const bytes = statSync(p).size;
     const a = JSON.parse(readFileSync(p, 'utf8'));
     const slots = a.cols * a.rows;
-    const mask = (bx, by) => B64.indexOf(a.blocks[(by - a.by0) * a.cols + (bx - a.bx0)]);
+    // `blockChars` is the artifact's own statement of its width (1 in atlas v1, 2 since
+    // `water` made seven classes). Read it rather than assume it — an inspector that
+    // hard-codes the width reads a v2 raster as twice as many blocks of nonsense and says
+    // nothing looked wrong.
+    const bc = a.blockChars ?? 1;
+    const slotAt = (i) => {
+      let m = 0;
+      for (let k = 0; k < bc; k++) m = m * 64 + B64.indexOf(a.blocks[i * bc + k]);
+      return m;
+    };
+    const mask = (bx, by) => slotAt((by - a.by0) * a.cols + (bx - a.bx0));
     const blockDeg = a.blockCells * a.cellDeg;
     const latMid = (a.by0 + a.rows / 2) * blockDeg;
     const kmNS = (blockDeg * 111.32).toFixed(1);
@@ -418,8 +475,8 @@ function reportAtlas() {
 
     let occupied = 0;
     const perClass = new Map(a.classes.map((c) => [c, 0]));
-    for (let i = 0; i < a.blocks.length; i++) {
-      const m = B64.indexOf(a.blocks[i]);
+    for (let i = 0; i < slots; i++) {
+      const m = slotAt(i);
       if (m > 0) occupied++;
       a.classes.forEach((c, bit) => {
         if (m & (1 << bit)) perClass.set(c, perClass.get(c) + 1);
@@ -444,13 +501,19 @@ function reportAtlas() {
       continue;
     }
     const fromSidecar = new Map(); // `${bx}:${by}` -> Map(class -> cell count)
+    let classesDrift = 0;
     for (const line of readFileSync(path.join(outDir, side), 'utf8').split('\n')) {
       if (!line) continue;
       const c = JSON.parse(line);
       const k = Math.floor(c.cx / a.blockCells) + ':' + Math.floor(c.cy / a.blockCells);
       let e = fromSidecar.get(k);
       if (!e) fromSidecar.set(k, (e = new Map()));
-      e.set(c.class, (e.get(c.class) ?? 0) + 1);
+      // Multi-label: one cell backs EVERY class it carries. Re-derived from the record `f`
+      // rather than read off `classes`, so the cross-check tests the rules and not the
+      // tiler's memory of them — `classes` and `f` disagreeing is itself a finding.
+      const derived = classesOf(classifyFeatures(decodeFeatures(c.f)));
+      if (derived.join(',') !== (c.classes ?? []).join(',')) classesDrift++;
+      for (const cls of derived) e.set(cls, (e.get(cls) ?? 0) + 1);
     }
     // The headline habitat table above counts tile-grid characters, which near a slice
     // border include cells classified from the neighbouring extract's buffer geometry —
@@ -464,7 +527,9 @@ function reportAtlas() {
         ownedCounts.set(cls, (ownedCounts.get(cls) ?? 0) + n);
         ownedTotal += n;
       }
-    console.log(`\n  ── the same classes over ${ownedTotal.toLocaleString()} SLICE-OWNED non-rural cells ──`);
+    console.log(`\n  ── the same LABELS over the slice's OWNED walkable cells (${ownedTotal.toLocaleString()} labels) ──`);
+    if (classesDrift)
+      console.log(`  !! ${classesDrift} sidecar lines whose \`classes\` disagree with re-deriving from \`f\``);
     for (const [c, n] of [...ownedCounts].sort((x, y) => y[1] - x[1])) console.log(row(c, n, ownedTotal));
 
     let missing = 0; // sidecar says the class is there, the atlas does not
@@ -488,12 +553,12 @@ function reportAtlas() {
         const m = mask(bx, by);
         const e = fromSidecar.get(bx + ':' + by);
         a.classes.forEach((c, bit) => {
-          // `rural` is the one class the sidecar omits by design (SPEC §10.7), so the
-          // atlas legitimately carries a bit nothing here can back. Everything else must
-          // be backed — INCLUDING `mountain`, which was skipped while the bit could only
-          // ever be 0. Leaving it skipped once revision 3 started setting it would have
-          // made the one new bit the only unverified one in the artifact.
-          if (c === 'rural') return;
+          // EVERY bit is checked now, `rural` included. Revision 3's sidecar omitted rural
+          // so the rural bit was structurally unbackable; revision 4's filter is `all > 0`
+          // rather than "non-rural", so a rural cell IS a line and the last unverified bit
+          // in the artifact is gone. `water` is inside this check from its first bake — the
+          // mountain rollout is the argument: a brand-new bit is exactly the one whose
+          // verification must not be skipped "for now".
           if (m & (1 << bit) && !(e && e.get(c))) extra++;
         });
       }
@@ -513,7 +578,7 @@ function reportAtlas() {
     // that the block index is not transposed or off by one — and the RAREST class present
     // is the informative glyph, because in a rural state `rural` and `residential` are in
     // nearly every block and would paint over everything that distinguishes one from the next.
-    const GLYPH = { urban: 'U', residential: 'R', woodland: 'W', greenspace: 'S', rural: ',', mountain: 'M' };
+    const GLYPH = { urban: 'U', residential: 'R', woodland: 'W', greenspace: 'S', rural: ',', mountain: 'M', water: '~' };
     const rarest = [...perClass].filter(([, n]) => n > 0).sort((x, y) => x[1] - y[1]).map(([c]) => c);
     if (a.cols <= 160 && a.rows <= 80 && rarest.length) {
       console.log(`\n  RAREST class present in each block, north at top — ${rarest
