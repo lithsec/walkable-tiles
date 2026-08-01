@@ -1197,13 +1197,28 @@ trial distributions and balanced against the old peak scores, still hold unchang
 1. **RANK** by `sig` descending, ties broken by `key` ascending, so a re-bake of unchanged
    data produces the identical set.
 2. **SPREAD** — at most one anchor per `ANCHOR_CELL_DEG` = **0.5°** cell
-   (`floor(lat/0.5)`, `floor(lng/0.5)`). Without it the count cap alone picks the five
-   highest points on one mountain: Vermont's top summits by `ele` are Mansfield 1340, Adams
-   Apple 1256, Lower Lip 1256, The Nose 1225, Upper Lip 1208 — four of which are named
-   sub-summits *of* Mansfield, all within 2 km of it. 0.5° is ~46 km north-south and
-   `sqrt(1 / ANCHOR_DENSITY_PER_KM2)` is 45.8 km, so the cell **is** the density expressed
-   as a distance; the two terms agree by construction rather than by tuning, and the cell
-   nests exactly in whole degrees.
+   (`floor(lat/0.5)`, `floor(lng/0.5)`), **per group** (2026-08-01): `peak` competes with
+   `peak` for a cell, and every areal kind with every areal kind. One all-kinds list per
+   cell let the scenery evict the place that contains it — the shipped utah sidecar gave
+   Bears Ears' cell to Mount Linnaeus, a summit *inside* the monument — while the problem
+   the spread exists for (Vermont's top "summits" by `ele` being Mansfield 1340, Adams
+   Apple 1256, Lower Lip 1256, The Nose 1225, Upper Lip 1208 — four of them named
+   sub-summits *of* Mansfield) is same-group and stays fixed. 0.5° is ~46 km north-south
+   and `sqrt(1 / ANCHOR_DENSITY_PER_KM2)` is 45.8 km, so the cell **is** the density
+   expressed as a distance; the two terms agree by construction rather than by tuning, and
+   the cell nests exactly in whole degrees.
+
+   **`national_park` seats first** (2026-08-01), before the ranked fill, still counting
+   against the cap and occupying its group-cell. Per-kind references make a cemetery
+   comparable to a forest, but they also let a big feature in a small-reference kind
+   outscore a bigger one in a large-reference kind — measured: "Sand Mountain OHV Area"
+   (`park`, ref 1e5) at ~9 doublings beat 593 km² Zion (`national_park`, ref 5e7) at 3.6
+   for their shared cell, and no reference tuning fixes both directions at once. The kind
+   is already size-gated at promotion (`NP_MIN_AREA_M2`), so everything that carries it
+   has proven the significance the ranking estimates; there are at most a handful per
+   state. The bake also writes `anchor-cands-<slice>.jsonl` (local-only) — the full owned
+   candidate set with its measurements, so the next selection-rule change is a script over
+   jsonl instead of a re-stream of the extract.
 3. **COUNT** — `max(1, round(ANCHOR_DENSITY_PER_KM2 × sliceAreaKm2))`. The area is
    integrated by the same scanline and the same even-odd rule as `pointInRings`, so
    "inside" means here exactly what it means to `owns()`; a spherical-shoelace formula

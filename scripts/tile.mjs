@@ -1256,6 +1256,30 @@ function sliceAreaKm2() {
 // every slice gets its best thing, the minimum says only if that thing is significant at
 // all. A slice with nothing above its kinds' references emits an empty sidecar, and that is
 // an answer rather than a failure.
+// -- TWO REVISIONS, EACH FROM A MEASURED LOSS (2026-08-01) --------------------------
+//
+// The shipped utah sidecar carried 105 anchors and ZERO of the slice's national parks,
+// while the tiles under it carried both (Zion in 11,067 listings). Two separate causes,
+// read off the actual cell winners:
+//
+//   1. SPREAD IS NOW PER GROUP. Bears Ears' 0.5-degree cell went to Mount Linnaeus - a
+//      summit INSIDE the monument. Post-relief scoring, a 600 m drop scores ~5.3 and any
+//      big protected area is FULL of those, so one all-kinds list per cell means the
+//      scenery evicts the place that contains it, everywhere the ground is good. Peaks
+//      now compete with peaks for a cell and areal kinds with areal kinds, so "the best
+//      summit here" and "the best place here" can both anchor. The Mansfield problem the
+//      spread exists for was five SUMMITS on one mountain - same-group - and stays fixed.
+//
+//   2. NATIONAL PARKS ARE TAKEN FIRST. Zion (593 km^2, sig 3.6 against its 5e7 ref) lost
+//      its cell to "Sand Mountain OHV Area" - a huge feature tagged as an ordinary park,
+//      scoring ~9 against park's 1e5 ref. Per-kind references make a cemetery comparable
+//      to a forest, but they also mean a big feature in a small-reference kind outscores
+//      a bigger feature in a large-reference one, and no reference tuning fixes both
+//      directions at once. national_park is the one kind that is already SIZE-GATED at
+//      promotion (NP_MIN_AREA_M2 - nothing reaches it under 50 km^2), so every candidate
+//      that carries the kind has already proven the significance this ranking exists to
+//      estimate. They are seated before the ranked fill - a handful per state at most -
+//      and still count against the cap and occupy their group-cell.
 function selectAnchors() {
   const areaKm2 = sliceAreaKm2();
   const limit =
@@ -1263,14 +1287,31 @@ function selectAnchors() {
   const ranked = [...anchorCands.values()]
     .filter((a) => a.sig >= ANCHOR_SIG_MIN)
     .sort((a, b) => b.sig - a.sig || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  // Summits locate points; areal kinds locate places. One winner per cell per GROUP.
+  const spreadGroup = (kind) => (kind === 'peak' ? 'summit' : 'ground');
   const takenCells = new Set();
   const out = [];
-  for (const a of ranked) {
-    if (out.length >= limit) break;
-    const ck = Math.floor(a.lat / ANCHOR_CELL_DEG) + ':' + Math.floor(a.lng / ANCHOR_CELL_DEG);
-    if (takenCells.has(ck)) continue;
+  const seat = (a) => {
+    const ck =
+      spreadGroup(a.kind) +
+      ':' +
+      Math.floor(a.lat / ANCHOR_CELL_DEG) +
+      ':' +
+      Math.floor(a.lng / ANCHOR_CELL_DEG);
+    if (takenCells.has(ck)) return false;
     takenCells.add(ck);
     out.push(a);
+    return true;
+  };
+  for (const a of ranked) {
+    if (out.length >= limit) break;
+    if (a.kind !== 'national_park') continue;
+    seat(a);
+  }
+  for (const a of ranked) {
+    if (out.length >= limit) break;
+    if (a.kind === 'national_park') continue;
+    seat(a);
   }
   // Sorted by KEY for the sidecar — by identity, not by score, so the file diffs
   // line-for-line against the previous bake instead of reshuffling when one score moves.
@@ -1553,6 +1594,20 @@ writeFileSync(
       ),
     )
     .join('\n') + (anchorSel.anchors.length ? '\n' : ''),
+);
+
+// The CANDIDATE set, with the measurements the selection ran on. Local-only (never
+// uploaded): its audience is the next selection-rule change. The 2026-08-01 revision to
+// selectAnchors could not be applied to the shipped sidecars without re-streaming five
+// extracts, because the tiles carry {name, lat, lng, kind} and the ranking needs sig -
+// the exact "bake the measurements, not the class" lesson the feature record already
+// learned, applied to anchors. With this file, re-selection is a script over jsonl.
+writeFileSync(
+  join(OUT, `anchor-cands-${SLICE}.jsonl`),
+  [...anchorCands.values()]
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    .map((a) => JSON.stringify(a))
+    .join('\n') + (anchorCands.size ? '\n' : ''),
 );
 
 // ---- Slice-owned spawn cells -> the habitat sidecar AND the habitat atlas ------------

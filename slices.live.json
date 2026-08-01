@@ -1,0 +1,27 @@
+[
+  {
+    "name": "massachusetts",
+    "url": "https://download.geofabrik.de/north-america/us/massachusetts-latest.osm.pbf",
+    "day": 1
+  },
+  {
+    "name": "utah",
+    "url": "https://download.geofabrik.de/north-america/us/utah-latest.osm.pbf",
+    "day": 5
+  },
+  {
+    "name": "arizona",
+    "url": "https://download.geofabrik.de/north-america/us/arizona-latest.osm.pbf",
+    "day": 6
+  },
+  {
+    "name": "florida",
+    "url": "https://download.geofabrik.de/north-america/us/florida-latest.osm.pbf",
+    "day": 7
+  },
+  {
+    "name": "kansas",
+    "url": "https://download.geofabrik.de/north-america/us/kansas-latest.osm.pbf",
+    "day": 7
+  }
+]
