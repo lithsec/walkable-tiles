@@ -38,6 +38,19 @@ const BOX_HALF_M = 1200;
 const FOOT = new Set(['footway', 'path', 'pedestrian', 'steps', 'track', 'living_street']);
 const ROAD = new Set(['residential', 'service', 'unclassified']);
 const WALK = new Set([...FOOT, ...ROAD]);
+// HAZARD_HIGHWAYS (walkgraph) — tertiary and up. NOT walkable and never in `ways`: a creature
+// must not stand on an arterial and the snap must not reach for one, which is exactly why they
+// were filtered out of the bake entirely until now. They are carried SEPARATELY (v5 `hazards`,
+// geometry only) because two consumers need to SEE a road they may not walk on: the jaywalk guard,
+// which currently fails open on precisely the roads that matter most, and the map, which was
+// drawing a neighbourhood without its main street.
+const HAZARD = new Set([
+  'tertiary', 'tertiary_link',
+  'secondary', 'secondary_link',
+  'primary', 'primary_link',
+  'trunk', 'trunk_link',
+  'motorway', 'motorway_link',
+]);
 
 // ---- v5 constants (normative — SPEC.md §10 documents these values; change both) ----
 const CELL_DEG = 0.0015; // Ausculta spawn-cell grid (packages/content/src/habitat.ts density)
@@ -469,11 +482,11 @@ function cellsNear(lat, lng, radiusM = BOX_HALF_M) {
   return out;
 }
 
-const cells = new Map(); // key -> { ways:Map<id,way>, crossings:Map<coord,{lat,lng}> }
+const cells = new Map(); // key -> { ways:Map<id,way>, crossings:Map<coord,{lat,lng}>, hazards:Map<id,LatLng[]> }
 function cell(key) {
   let c = cells.get(key);
   if (!c) {
-    c = { ways: new Map(), crossings: new Map() };
+    c = { ways: new Map(), crossings: new Map(), hazards: new Map() };
     cells.set(key, c);
   }
   return c;
@@ -489,6 +502,20 @@ function addWay(id, points, foot, name, lit, access) {
     // the v4 write loop below spells its way objects out field by field, so v4 stays
     // byte-identical whatever is attached here.
     if (!c.ways.has(id)) c.ways.set(id, { points, foot, name, lit, access });
+  }
+}
+
+// Same cell-binning as addWay, into a SEPARATE map. Kept apart rather than flagged inside
+// `c.ways` on purpose: the v4 writer iterates `c.ways` field-by-field, so a hazard parked there
+// would land in v4 — breaking the byte-identity Cologra depends on — and would also reach every
+// consumer that treats `ways` as the walk graph. Geometry only: the client's contract is explicit
+// that hazards carry no names (tiles-client `TilePayload`).
+function addHazard(id, points) {
+  const touched = new Set();
+  for (const p of points) for (const k of cellsNear(p.lat, p.lng)) touched.add(k);
+  for (const k of touched) {
+    const c = cell(k);
+    if (!c.hazards.has(id)) c.hazards.set(id, points);
   }
 }
 
@@ -968,6 +995,10 @@ for await (let line of rl) {
       // highway filter matched. They cost a filter change of exactly zero.
       addWay(id, points, FOOT.has(hw), pr.name || null, wayLit(pr), wayAccess(pr));
       habAddWay(points, hw);
+    } else if (HAZARD.has(hw)) {
+      // Geometry only, and deliberately NOT fed to habAddWay: habitat describes ground a player
+      // walks, and an arterial is the one thing this pipeline is certain they should not.
+      addHazard(id, g.coordinates.map((c) => ({ lat: c[1], lng: c[0] })));
     }
     if (pr.footway === 'crossing' && g.coordinates.length) {
       const mid = g.coordinates[Math.floor(g.coordinates.length / 2)];
@@ -1411,10 +1442,17 @@ for (const key of v5Keys) {
       names.push(w.name);
     }
   const crossings = c ? [...c.crossings.values()] : [];
+  const hazards = c ? [...c.hazards.values()] : [];
   const landcover = buildLandcover(i, j, lcByCell.get(key));
   const landmarks = buildLandmarks(i, j, lmByCell.get(key));
-  if (!ways.length && !crossings.length && !landcover.length && !landmarks.length) continue;
+  if (!ways.length && !crossings.length && !hazards.length && !landcover.length && !landmarks.length)
+    continue;
   const payload = { v: 5, ways, names, crossings, landcover, landmarks, habitat: buildHabitat(i, j) };
+  // APPENDED, and only when the cell actually has an arterial. Both halves are deliberate: a key
+  // added at the END leaves the JSON of every hazard-free cell byte-identical to the last bake, so
+  // its sha256 is unchanged and the publish step skips it — a re-bake then re-uploads only the
+  // cells that genuinely gained a road, instead of all 206k of them.
+  if (hazards.length) payload.hazards = hazards;
   const json = JSON.stringify(payload);
   hashes5[key] = createHash('sha256').update(json).digest('hex');
   const dir = join(OUT, 'v5', String(i));

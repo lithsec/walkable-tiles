@@ -127,12 +127,25 @@ phase "tags-filter"
 # the tiler's output. Adding a `w/lit=*` line would only widen the selection to ways we do
 # not walk.
 #
+# ── THE HAZARD CLASSES (tertiary and up), ADDED 2026-08-07 ────────────────────────────
+# The `w/highway=` line now also selects tertiary/secondary/primary/trunk/motorway (+ _link).
+# These are NOT walkable and the tiler never puts them in `ways` — they go to the v5-only
+# `hazards` array (tile.mjs `HAZARD`), geometry only. Two consumers were blind without them:
+# the jaywalk guard, which failed open on exactly the arterials that matter most, and the map,
+# which drew a neighbourhood with every main street missing (verified on a real Boston tile:
+# `Tremont Place` present, Tremont Street absent).
+#
+# v4 STAYS BYTE-IDENTICAL. Widening tags-filter only widens what the tiler SEES; v4's writer
+# iterates `c.ways`, hazards live in `c.hazards`, and the v5 payload appends `hazards` last and
+# only when non-empty — so a cell with no arterial hashes exactly as it did before and the
+# publish step skips it.
+#
 # `boundary=administrative` is deliberately absent too: it is the only thing that would
 # give a settlement's true EXTENT, and it is a relation-heavy geometry class an order
 # larger than everything else here. Settlements are carried as their centre NODE with a
 # documented proximity radius instead — SPEC §10.2 says so rather than implying membership.
 osmium tags-filter --overwrite -o "$FILTERED" "$PBF" \
-  w/highway=footway,path,pedestrian,steps,track,living_street,residential,service,unclassified \
+  w/highway=footway,path,pedestrian,steps,track,living_street,residential,service,unclassified,tertiary,tertiary_link,secondary,secondary_link,primary,primary_link,trunk,trunk_link,motorway,motorway_link \
   n/highway=crossing \
   w/footway=crossing \
   a/natural=wood,water \
