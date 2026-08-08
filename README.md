@@ -147,6 +147,30 @@ is using the app, so there is no compatibility layer and there should not be one
 
 ---
 
+## Reading a published tile: use the ARCHIVE, not the object path
+
+`v5/<i>/<j>.json.gz` still resolves for many cells and still returns 200 — those objects are the
+PRE-ARCHIVE layout and are no longer written. A publish now uploads one `.wta` per slice per
+version plus `index.json`; the old per-cell objects are simply left where they were, months stale.
+
+This is a live trap, not a hypothetical: verifying the 2026-08-07 arterial bake against
+`v5/4235/-7107.json.gz` reported `hazards: ABSENT` and an unchanged byte count — the bake looked
+like it had silently failed. It had not; the check was reading a fossil.
+
+To spot-check a real cell:
+
+```
+GET  <host>/v5/archive/index.json        -> find the slice's { path, sha256, tileCount }
+GET  <host>/<path>  Range: bytes=0-127   -> header; dirOffset @48, dirLength @56 (u64 LE)
+GET  <host>/<path>  Range: <dir span>    -> decodeDirectory() from scripts/archive.mjs
+                                            findTile(dir, tileId(i, j)) -> offset/length
+GET  <host>/<path>  Range: <tile span>   -> gunzip -> the tile JSON
+```
+
+The packer already proves the archive matches what the tiler wrote — it re-opens the archive it
+just wrote and compares every tile byte-for-byte (`verified N/N tiles byte-identical` in the log),
+so that line plus a new `sha256` in `index.json` is usually the faster answer than a ranged read.
+
 ## How a bake works (per slice)
 
 1. **Download** the slice's `.osm.pbf` from Geofabrik.
