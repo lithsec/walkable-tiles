@@ -282,78 +282,138 @@ publish_archive() {
   # Set BEFORE the early return, not after: under `set -u` an unset flag is a hard exit at
   # the build stamp, and the one path that takes that return is the one nobody tests.
   ARCHIVE_CHANGED=0
-  local IDX="$OUT/archive/$VER/$NAME.idx.json"
-  [ -f "$IDX" ] || { echo "[$NAME] $VER: no archive packed — skipping"; return 0; }
-  local ARCPATH SHA ARC
-  ARCPATH=$(jq -r .path "$IDX")               # e.g. v5/archive/vermont-ab12cd34ef56.wta
-  SHA=$(jq -r .sha256 "$IDX")
-  ARC="$OUT/archive/$VER/$(basename "$ARCPATH")"
-  [ -f "$ARC" ] || { echo "[$NAME] $VER: sidecar names $ARCPATH but the file is missing" >&2; exit 1; }
 
-  local PREVIDX="$WORK/prev-$VER.idx.json" PREVSHA="" PREVPATH=""
-  if aws s3 cp "s3://$R2_BUCKET/$VER/archive/$NAME.idx.json" "$PREVIDX" --only-show-errors 2>/dev/null; then
-    PREVSHA=$(jq -r '.sha256 // ""' "$PREVIDX")
-    PREVPATH=$(jq -r '.path // ""' "$PREVIDX")
-  fi
+  # ── THE FAMILY, NOT THE SLICE ────────────────────────────────────────────────────────
+  #
+  # A slice packs to ONE archive under the 512 MB cacheable ceiling and to SEVERAL above it
+  # (see pack-archives.mjs). So the unit here is the family — `florida.idx.json` OR
+  # `florida-a.idx.json`, `florida-b.idx.json`, … — and every step below loops it.
+  local IDXDIR_LOCAL="$OUT/archive/$VER"
+  local -a SIDECARS=()
+  local f
+  for f in "$IDXDIR_LOCAL/$NAME.idx.json" "$IDXDIR_LOCAL/$NAME"-?.idx.json "$IDXDIR_LOCAL/$NAME"-??.idx.json; do
+    [ -f "$f" ] && SIDECARS+=("$f")
+  done
+  [ ${#SIDECARS[@]} -gt 0 ] || { echo "[$NAME] $VER: no archive packed — skipping"; return 0; }
 
-  if [ "$SHA" = "$PREVSHA" ]; then
-    echo "[$NAME] $VER: archive unchanged (${SHA:0:16}…) — 0 objects uploaded"
-    ARCHIVE_CHANGED=0
-    return 0
-  fi
-  ARCHIVE_CHANGED=1
+  # THE PREVIOUS GENERATION, captured BEFORE anything is overwritten. Everything named here
+  # survives this run: a client's index is up to ARCHIVE_INDEX_TTL_MS (1 hour) old and is
+  # still asking for these exact keys. This is also what makes RE-SHARDING safe — going from
+  # `florida` to `florida-a/-b/-c` retires a path no new index mentions, and it has to outlive
+  # the indexes that still do.
+  local PREVDIR="$WORK/prev-$VER"
+  rm -rf "$PREVDIR"; mkdir -p "$PREVDIR"
+  aws s3 cp "s3://$R2_BUCKET/$VER/archive/" "$PREVDIR" --recursive \
+    --exclude '*' --include "$NAME.idx.json" --include "$NAME-*.idx.json" --only-show-errors 2>/dev/null || true
+  local PREVPATHS=""
+  for f in "$PREVDIR"/*.idx.json; do
+    [ -f "$f" ] || continue
+    PREVPATHS="$PREVPATHS $(jq -r '.path // ""' "$f")"
+  done
 
-  local ARCBYTES; ARCBYTES=$(jq -r .bytes "$IDX")
-  local ARCTILES; ARCTILES=$(jq -r .tileCount "$IDX")
-  echo "[$NAME] $VER: publishing $ARCTILES tiles as one $ARCBYTES B archive -> $ARCPATH"
+  # ── 1 + 2. Each shard: its archive, then its sidecar ────────────────────────────────
+  local PUBLISHED=""
+  local KEEPIDX=""
+  local IDX ARCPATH SHA ARC SNAME PREVSHA
+  for IDX in "${SIDECARS[@]}"; do
+    SNAME=$(jq -r .slice "$IDX")
+    ARCPATH=$(jq -r .path "$IDX")
+    SHA=$(jq -r .sha256 "$IDX")
+    ARC="$OUT/archive/$VER/$(basename "$ARCPATH")"
+    KEEPIDX="$KEEPIDX $SNAME.idx.json"
+    [ -f "$ARC" ] || { echo "[$NAME] $VER: sidecar names $ARCPATH but the file is missing" >&2; exit 1; }
 
-  # 1. The archive. `immutable` is honest here and nowhere else in this script: the key
-  #    contains the digest of the bytes, so this object can never change.
-  aws s3 cp "$ARC" "s3://$R2_BUCKET/$ARCPATH" \
-    --content-type application/octet-stream \
-    --cache-control "public, max-age=31536000, immutable" \
-    --only-show-errors
+    PREVSHA=""
+    [ -f "$PREVDIR/$SNAME.idx.json" ] && PREVSHA=$(jq -r '.sha256 // ""' "$PREVDIR/$SNAME.idx.json")
+    if [ "$SHA" = "$PREVSHA" ]; then
+      echo "[$NAME] $VER: $SNAME unchanged (${SHA:0:16}…) — 0 objects uploaded"
+      PUBLISHED="$PUBLISHED $SNAME:$SHA"
+      continue
+    fi
+    ARCHIVE_CHANGED=1
 
-  # 2. The sidecar, SHORT-lived at the edge: it is how a republish becomes visible.
-  aws s3 cp "$IDX" "s3://$R2_BUCKET/$VER/archive/$NAME.idx.json" \
-    --content-type application/json --cache-control "public, max-age=60" --only-show-errors
+    local ARCBYTES ARCTILES
+    ARCBYTES=$(jq -r .bytes "$IDX")
+    ARCTILES=$(jq -r .tileCount "$IDX")
+    if [ "$ARCBYTES" -gt 536870912 ]; then
+      echo "[$NAME] $VER: WARNING $SNAME is $ARCBYTES B, over Cloudflare's 512 MB cacheable" >&2
+      echo "[$NAME] $VER: ceiling — it will serve every tile from origin (cf-cache-status: BYPASS)." >&2
+    fi
+    echo "[$NAME] $VER: publishing $SNAME, $ARCTILES tiles, $ARCBYTES B -> $ARCPATH"
 
-  # 3. index.json, rebuilt from every sidecar in the bucket. ~1 KB per slice, so this is a
-  #    handful of tiny GETs and one small PUT even at full-globe scale.
+    # `immutable` is honest here and nowhere else in this script: the key contains the digest
+    # of the bytes, so this object can never change.
+    aws s3 cp "$ARC" "s3://$R2_BUCKET/$ARCPATH" \
+      --content-type application/octet-stream \
+      --cache-control "public, max-age=31536000, immutable" \
+      --only-show-errors
+
+    # SHORT-lived at the edge: the sidecar is how a republish becomes visible.
+    aws s3 cp "$IDX" "s3://$R2_BUCKET/$VER/archive/$SNAME.idx.json" \
+      --content-type application/json --cache-control "public, max-age=60" --only-show-errors
+    PUBLISHED="$PUBLISHED $SNAME:$SHA"
+  done
+
+  # ── 2b. RETIRE STALE FAMILY SIDECARS, and this is the step re-sharding cannot skip ───
+  #
+  # `index.json` is rebuilt from EVERY sidecar in the bucket. Re-sharding `florida` into
+  # `florida-a/-b/-c` leaves `florida.idx.json` behind, so the next index would advertise the
+  # whole old archive AND the three new shards — every cell double-covered, and the client
+  # resolving through whichever it iterated first. The ARCHIVES stay (the retention rule
+  # below owns those); only the sidecar goes, because the sidecar is what the index is made
+  # of and a client never fetches one.
+  for f in "$PREVDIR"/*.idx.json; do
+    [ -f "$f" ] || continue
+    local BN; BN=$(basename "$f")
+    case " $KEEPIDX " in
+      *" $BN "*) continue ;;
+    esac
+    echo "[$NAME] $VER: retiring stale sidecar $BN (re-shard)"
+    aws s3 rm "s3://$R2_BUCKET/$VER/archive/$BN" --only-show-errors
+  done
+
+  # ── 3. index.json, rebuilt from every sidecar in the bucket ──────────────────────────
   local IDXDIR="$WORK/idx-$VER"
   rm -rf "$IDXDIR"; mkdir -p "$IDXDIR"
   aws s3 cp "s3://$R2_BUCKET/$VER/archive/" "$IDXDIR" --recursive \
     --exclude '*' --include '*.idx.json' --only-show-errors
-  # Assert on the VALUE: the rebuild MUST contain the slice just published, or the archive
-  # is in the bucket and unreachable — an upload that reports success and publishes nothing,
-  # which is the failure mode this script has already been bitten by once (see the
-  # AWS_ENDPOINT_URL note above).
   jq -s --arg ver "$VER" '{v:1, version:$ver, slices: sort_by(.slice)}' "$IDXDIR"/*.idx.json \
     > "$WORK/index-$VER.json"
-  jq -e --arg s "$NAME" --arg sha "$SHA" \
-    'any(.slices[]; .slice == $s and .sha256 == $sha)' "$WORK/index-$VER.json" > /dev/null || {
-      echo "[$NAME] $VER: rebuilt index does not contain this slice at $SHA — refusing to publish it" >&2
-      exit 1; }
+  # Assert on the VALUE, once per shard: every piece just published must be reachable through
+  # the rebuilt index, or an archive sits in the bucket unreachable — an upload that reports
+  # success and publishes nothing, which this script has been bitten by once already.
+  local ent
+  for ent in $PUBLISHED; do
+    SNAME="${ent%%:*}"; SHA="${ent##*:}"
+    jq -e --arg s "$SNAME" --arg sha "$SHA" \
+      'any(.slices[]; .slice == $s and .sha256 == $sha)' "$WORK/index-$VER.json" > /dev/null || {
+        echo "[$NAME] $VER: rebuilt index does not contain $SNAME at $SHA — refusing to publish it" >&2
+        exit 1; }
+  done
   aws s3 cp "$WORK/index-$VER.json" "s3://$R2_BUCKET/$VER/archive/index.json" \
     --content-type application/json --cache-control "public, max-age=60" --only-show-errors
 
-  # 4. Retire the generation BEFORE the previous one. Two live generations is the retention
-  #    rule, and it is derived rather than guessed: a client's index is at most
-  #    ARCHIVE_INDEX_TTL_MS (1 hour) old, so the previous archive must survive at least that
-  #    long after a republish.
+  # ── 4. Retire the generation BEFORE the previous one ─────────────────────────────────
+  #
+  # Two live generations, derived rather than guessed: a client's index is at most
+  # ARCHIVE_INDEX_TTL_MS (1 hour) old, so the previous archive must survive that long past a
+  # republish. The pattern matches the whole family — `<slice>-<sha12>.wta` and
+  # `<slice>-<suffix>-<sha12>.wta` — so a re-shard eventually reclaims the one-piece archive
+  # too, one generation later, which is exactly when no live index can still name it.
+  local CURRENT=""
+  for IDX in "${SIDECARS[@]}"; do CURRENT="$CURRENT $(jq -r .path "$IDX")"; done
   local OLDER="$WORK/older-$VER.txt"
   aws s3 ls "s3://$R2_BUCKET/$VER/archive/" | awk '{print $4}' \
-    | grep -E "^${NAME}-[0-9a-f]{12}\.wta$" > "$OLDER" || true
+    | grep -E "^${NAME}(-[a-z]{1,2})?-[0-9a-f]{12}\.wta$" > "$OLDER" || true
   while read -r f; do
     [ -z "$f" ] && continue
-    [ "$VER/archive/$f" = "$ARCPATH" ] && continue
-    [ -n "$PREVPATH" ] && [ "$VER/archive/$f" = "$PREVPATH" ] && continue
+    case " $CURRENT " in *" $VER/archive/$f "*) continue ;; esac
+    case " $PREVPATHS " in *" $VER/archive/$f "*) continue ;; esac
     echo "[$NAME] $VER: retiring $f"
     aws s3 rm "s3://$R2_BUCKET/$VER/archive/$f" --only-show-errors
   done < "$OLDER"
 
   # The per-cell hash manifest, still published — no longer a gate, still the record.
-  # See the header above.
   local HASHFILE="$OUT/hashes.json"
   [ "$VER" = v5 ] && HASHFILE="$OUT/hashes-v5.json"
   [ "$VER" = v5c ] && HASHFILE="$OUT/hashes-v5c.json"

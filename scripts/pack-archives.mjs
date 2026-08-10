@@ -155,12 +155,123 @@ function readAt(fd, off, len) {
   return b;
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════
+// SHARDING, AND THE 512 MB CEILING THAT FORCED IT
+// ════════════════════════════════════════════════════════════════════════════════════
+//
+// Cloudflare will not cache an object over 512 MB (Free/Pro/Business). Measured against the
+// live bucket on 2026-08-10: massachusetts 442.5 MB HIT, kansas 482.6 MB HIT, utah 724.9 MB
+// BYPASS, arizona 885.0 MB BYPASS, florida 1162.6 MB BYPASS. Three of five live slices were
+// therefore serving EVERY tile from R2 origin, which is the one thing the archive format was
+// built to stop paying for. No cache rule fixes it — the objects already publish
+// `immutable, max-age=31536000` — and nothing was misconfigured. They were simply too big.
+//
+// The measurement PMTILES-SCOPING asked for was taken, honestly, on district-of-columbia
+// (15 MB) and vermont (146 MB). Both sit under the ceiling. Baking whole states walked past
+// it without anyone looking at a response header.
+//
+// WHY THIS NEEDS NO CLIENT CHANGE, which is the part worth checking before believing it.
+// `candidateSlices` in apps/mobile/src/tiles/archive.ts is
+// `index.slices.filter((s) => coverHas(s, i, j))` — a filter over ENTRIES by coverage
+// bitmap, with no uniqueness assumption on the slice name — and the resolver already loops
+// candidates, because a 0.1 degree block straddling a slice boundary has always produced
+// two. A shard is just another entry with a disjoint cover. `entry.slice` is used for
+// exactly two things in the client: the directory cache key and a sort order. So shards get
+// DISTINCT names (`florida-a`, `florida-b`); same-named shards would collide on that cache
+// key and thrash, each evicting the last, which the sha guard makes correct but ruinous.
+//
+// SPLIT ON COVERAGE-BLOCK ROWS, never mid-block. A block is COVER_BLOCK cells of latitude;
+// splitting inside one would make two shards claim it, costing a wasted directory fetch on
+// every lookup in that band. Rows keep each shard's cover a clean disjoint set. A single row
+// larger than the target is packed whole and warned about rather than split — the alternative
+// is a shard whose coverage interleaves another's, and correctness beats the last few MB.
+const MAX_ARCHIVE_BYTES = Number(flag('max-bytes', String(450 * 1024 * 1024)));
+
+/** `a`, `b`, … `z`, `aa`, `ab`, … — a stable suffix per shard index. */
+function shardSuffix(k) {
+  const a = 'a'.charCodeAt(0);
+  return k < 26
+    ? String.fromCharCode(a + k)
+    : String.fromCharCode(a + Math.floor(k / 26) - 1) + String.fromCharCode(a + (k % 26));
+}
+
+/** Partition tiles (already in tile-id order, so latitude-major) into groups no larger than
+ *  MAX_ARCHIVE_BYTES, cutting only on coverage-block row boundaries. */
+function shardTiles(tiles) {
+  const total = tiles.reduce((a, t) => a + t.size, 0);
+  if (MAX_ARCHIVE_BYTES <= 0 || total <= MAX_ARCHIVE_BYTES) return [tiles];
+
+  const rows = [];
+  let row = null;
+  for (const t of tiles) {
+    const br = Math.floor(t.i / COVER_BLOCK);
+    if (row === null || row.br !== br) {
+      row = { br, tiles: [], size: 0 };
+      rows.push(row);
+    }
+    row.tiles.push(t);
+    row.size += t.size;
+  }
+
+  const groups = [];
+  let g = null;
+  for (const r of rows) {
+    // The `g.tiles.length > 0` guard is load-bearing: without it a single row bigger than the
+    // target would open a fresh group and immediately overflow it, forever.
+    if (g === null || (g.tiles.length > 0 && g.size + r.size > MAX_ARCHIVE_BYTES)) {
+      g = { tiles: [], size: 0 };
+      groups.push(g);
+    }
+    if (r.size > MAX_ARCHIVE_BYTES) {
+      console.warn(
+        `[pack] WARNING: coverage-block row ${r.br} is ${r.size} B on its own, over the ` +
+          `${MAX_ARCHIVE_BYTES} B target. Packed whole — this shard will not edge-cache.`,
+      );
+    }
+    g.tiles.push(...r.tiles);
+    g.size += r.size;
+  }
+  return groups.map((x) => x.tiles);
+}
+
 async function packVersion(version) {
   const verDir = join(OUT, version);
   if (!existsSync(verDir)) return null;
-  const tiles = listTiles(verDir);
-  if (tiles.length === 0) return null;
+  const all = listTiles(verDir);
+  if (all.length === 0) return null;
 
+  const groups = shardTiles(all);
+  const destDir = join(DEST, version);
+  mkdirSync(destDir, { recursive: true });
+
+  const out = [];
+  for (let k = 0; k < groups.length; k++) {
+    const sliceName = groups.length === 1 ? SLICE : `${SLICE}-${shardSuffix(k)}`;
+    out.push(await packShard(version, groups[k], sliceName));
+  }
+
+  // ── RETIRE THE PREVIOUS GENERATION, family-wide, and only once every shard succeeded ──
+  //
+  // The family is `<slice>` plus `<slice>-<suffix>`, so re-sharding a slice that was packed
+  // whole must drop the whole archive AND its sidecar. Leaving the stale sidecar would be the
+  // real bug: `rebuildIndex` globs every `.idx.json`, so the index would advertise the old
+  // one-piece archive AND the new shards, double-covering every cell and pointing at a path
+  // the publisher no longer uploads.
+  //
+  // AFTER, not before: a failure mid-pack leaves the previous generation intact.
+  const keepIdx = new Set(out.map((r) => `${r.sliceName}.idx.json`));
+  const keepWta = new Set(out.map((r) => r.archiveName));
+  const family = new RegExp(`^${SLICE}(-[a-z]{1,2})?(-[0-9a-f]{12})?\\.(wta|idx\\.json)$`);
+  for (const f of readdirSync(destDir)) {
+    if (!family.test(f)) continue;
+    if (keepIdx.has(f) || keepWta.has(f)) continue;
+    rmSync(join(destDir, f), { force: true });
+  }
+
+  return out;
+}
+
+async function packShard(version, tiles, sliceName) {
   const entries = tiles.map((t) => ({ id: tileId(t.i, t.j), length: t.size }));
   for (let k = 1; k < entries.length; k++) {
     if (entries[k].id === entries[k - 1].id) {
@@ -183,7 +294,7 @@ async function packVersion(version) {
       JSON.stringify({
         format: MAGIC,
         formatVersion: FORMAT_VERSION,
-        slice: SLICE,
+        slice: sliceName,
         version,
         gridDenom: GRID_DENOM,
         tileCount: entries.length,
@@ -222,7 +333,7 @@ async function packVersion(version) {
   mkdirSync(destDir, { recursive: true });
   // Written under a temporary name and RENAMED to its digest once it is hashed and
   // verified — see the CONTENT-ADDRESSED note below.
-  const archivePath = join(destDir, `${SLICE}.wta.tmp`);
+  const archivePath = join(destDir, `${sliceName}.wta.tmp`);
 
   const hash = createHash('sha256');
   const stream = createWriteStream(archivePath);
@@ -297,18 +408,16 @@ async function packVersion(version) {
   //
   // The publisher keeps the PREVIOUS generation alive rather than deleting it, because a
   // client holding an index up to an hour old is still asking for it.
-  const name = `${SLICE}-${sha256.slice(0, 12)}.wta`;
+  const name = `${sliceName}-${sha256.slice(0, 12)}.wta`;
   const finalPath = join(destDir, name);
-  // Older generations of THIS slice in the local destination are removed; the bucket's
-  // retention is the publisher's business (bake-slice.sh keeps two).
-  for (const f of readdirSync(destDir)) {
-    if (f.startsWith(`${SLICE}-`) && f.endsWith('.wta') && f !== name) rmSync(join(destDir, f));
-  }
+  // Retiring older generations moved to `packVersion`: with sharding it is a decision about
+  // the whole FAMILY (`florida`, `florida-a`, `florida-b`), and a shard cannot see its
+  // siblings. Doing it here would have each shard delete the others as it finished.
   renameSync(archivePath, finalPath);
 
   const cover = encodeCover(tiles.map((t) => [t.i, t.j]));
   const sidecar = {
-    slice: SLICE,
+    slice: sliceName,
     version,
     path: `${version}/archive/${name}`,
     bytes,
@@ -323,10 +432,12 @@ async function packVersion(version) {
     coverBlock: COVER_BLOCK,
     cover,
   };
-  writeFileSync(join(destDir, `${SLICE}.idx.json`), JSON.stringify(sidecar));
+  writeFileSync(join(destDir, `${sliceName}.idx.json`), JSON.stringify(sidecar));
 
   return {
     version,
+    sliceName,
+    archiveName: name,
     archivePath: finalPath,
     tiles: entries.length,
     objectBytes: tileDataLength,
@@ -365,8 +476,8 @@ function rebuildIndex(version) {
 const report = [];
 for (const version of VERSIONS) {
   const r = await packVersion(version);
-  if (r) {
-    report.push(r);
+  if (r && r.length > 0) {
+    report.push(...r);
     rebuildIndex(version);
   }
 }
@@ -378,10 +489,16 @@ if (AS_JSON) {
   for (const r of report) {
     const pct = ((r.overheadBytes / r.objectBytes) * 100).toFixed(3);
     console.log(
-      `[pack] ${SLICE} ${r.version}: ${n(r.tiles)} tiles, ${n(r.objectBytes)} B as objects -> ` +
+      `[pack] ${r.sliceName} ${r.version}: ${n(r.tiles)} tiles, ${n(r.objectBytes)} B as objects -> ` +
         `${n(r.archiveBytes)} B archive (+${n(r.overheadBytes)} B, ${pct}%); ` +
         `directory ${n(r.dirBytes)} B gz / ${n(r.dirBytesRaw)} B raw, cover ${r.coverBytes} B`,
     );
+    if (r.archiveBytes > 512 * 1024 * 1024) {
+      console.log(
+        `[pack]   WARNING: ${n(r.archiveBytes)} B is over Cloudflare's 512 MB cacheable ceiling ` +
+          `— this archive will serve every tile from origin (cf-cache-status: BYPASS).`,
+      );
+    }
     console.log(
       `[pack]   verified ${n(r.verified)}/${n(r.tiles)} tiles byte-identical` +
         (r.verifiedAll ? ' (all)' : ' (--fast sample)') +
