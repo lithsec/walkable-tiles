@@ -214,6 +214,8 @@ async function resolveCell(version, i, j) {
 //   want.landmark  { kind | kindIn, nameIncludes, eleMin, eleMax, anchor }
 //                  at least one landmark must match every field given.
 //   want.attrWays  at least this many ways must carry `lit` or `access` (SPEC §10.6).
+//   want.surfaceWays
+//                  at least this many ways must carry `surface` (SPEC §10.6, revision 3).
 //   want.habitatHas / want.habitatLacks
 //                  class characters that must / must not appear in the cell's habitat grid
 //                  (SPEC §10.3). REVISION-AGNOSTIC on purpose: revision 3 ships a `cells`
@@ -316,6 +318,36 @@ const PROBES = [
     { landmark: { kindIn: ['national_park', 'protected_area'], nameIncludes: 'Everglades' } }],
   ['arizona', 'Grand Canyon NP named inside it (the Village)', 36.0544, -112.1401, 'any', ['v5'],
     { landmark: { kindIn: ['national_park', 'protected_area'], nameIncludes: 'Grand Canyon' } }],
+
+  // ── REVISION 3 FIELDS: per-way surface, and the new landmark kinds ──────────────────
+  //
+  // The floor is 20 rather than 1, unlike lit/access below, and the difference is measured
+  // rather than chosen: on the district-of-columbia trial 40.2% of ways carried `surface`
+  // against 5.1% for `lit`. A floor of 1 would go green on a bake that emitted the field for
+  // a handful of ways and dropped it everywhere else.
+  ['massachusetts', 'Boston ways carry surface', 42.3601, -71.0589, 'dense', ['v5'], { surfaceWays: 20 }],
+  ['florida', 'Miami ways carry surface', 25.7617, -80.1918, 'dense', ['v5'], { surfaceWays: 20 }],
+  ['utah', 'Salt Lake City ways carry surface', 40.7608, -111.891, 'dense', ['v5'], { surfaceWays: 20 }],
+
+  // A named lake as a LANDMARK — the kind that closes Ausculta's documented `water` gap
+  // ("no landmark kind promises waterside ground"). Lake Eola is a named `natural=water`
+  // polygon in the middle of downtown Orlando, which is also already a probed dense cell.
+  ['florida', 'Lake Eola is a named lake in downtown Orlando', 28.5443, -81.3731, 'dense', ['v5'],
+    { landmark: { kind: 'lake', nameIncludes: 'Eola' } }],
+
+  // ── WHAT IS DELIBERATELY NOT PROBED YET, AND WHY ────────────────────────────────────
+  //
+  // `beach`, `cliff`, `viewpoint`, `monument`, `ruins` and the waterway-line water class have
+  // no probe here. Not an oversight: a probe asserts a claim about a SPECIFIC cell, and
+  // picking one before a bake has shown what these slices actually carry means guessing at
+  // OSM's contents. A probe that goes red because nobody mapped a viewpoint at the
+  // coordinate somebody guessed is worse than no probe — it trains the reader to ignore red,
+  // which is the one thing this file cannot afford.
+  //
+  // The district-of-columbia trial produced lake:26, monument:10, wood:3, viewpoint:3,
+  // ruins:2 and correctly zero beaches and cliffs, so the CHANNELS are proven. Add the
+  // per-cell probes from the first real bake's `inspect-bake` output, where the names are
+  // facts rather than guesses.
 
   // Per-way `lit`/`access`. The floor is ONE way in a 1200 m radius of a downtown, across
   // three different cities — enough to prove the channel is populated, and deliberately not
@@ -448,6 +480,11 @@ async function probe(ver, lat, lng) {
     // SPEC §10.6 — a way carries these only when OSM tagged them, so counting the ways
     // that have EITHER is the cheapest proof the channel exists at all.
     attrWays: ways.filter((w) => w.lit !== undefined || w.access !== undefined).length,
+    // SPEC §10.6 revision 3. Counted SEPARATELY from attrWays rather than folded into it:
+    // `surface` is an order of magnitude better covered in OSM than `lit` (40.2% of ways vs
+    // 5.1% on the district-of-columbia trial), so one combined count would go green on lit
+    // alone and never notice surface missing.
+    surfaceWays: ways.filter((w) => typeof w.surface === 'string' && w.surface.length > 0).length,
     ptsInCell,
     sampleName: (tile.names ?? []).find(Boolean) ?? null,
   };
@@ -568,6 +605,9 @@ function judge(expect, ver, r, want) {
     if (want.attrWays !== undefined && r.attrWays < want.attrWays) {
       bad.push(`ways carrying lit/access ${r.attrWays} < ${want.attrWays} (SPEC §10.6 field absent)`);
     }
+    if (want.surfaceWays !== undefined && r.surfaceWays < want.surfaceWays) {
+      bad.push(`ways carrying surface ${r.surfaceWays} < ${want.surfaceWays} (SPEC §10.6 rev 3 field absent)`);
+    }
     const tally = () => {
       const n = {};
       for (const ch of r.habitatCells) n[ch] = (n[ch] ?? 0) + 1;
@@ -628,7 +668,7 @@ for (const [slice, label, lat, lng, expect, versions, want] of PROBES) {
               ? `ERROR ${r.error}`
               : r.kind
           : `${r.bytes}B ${r.slice} ways=${r.ways} named=${r.named} xings=${r.crossings}` +
-            (ver === 'v5' ? ` landcover=${r.landcover} lm=${r.landmarks.length} litAcc=${r.attrWays}` : '') +
+            (ver === 'v5' ? ` landcover=${r.landcover} lm=${r.landmarks.length} litAcc=${r.attrWays} surf=${r.surfaceWays}` : '') +
             ` inCell=${r.ptsInCell}` +
             (r.sampleName ? ` "${r.sampleName}"` : '');
       console.log(`${tag} ${slice}/${ver} ${label} [${expect}] ${r.i}/${r.j}  ${detail}`);
@@ -637,8 +677,63 @@ for (const [slice, label, lat, lng, expect, versions, want] of PROBES) {
   }
 }
 
-if (asJson) console.log(JSON.stringify({ host: LOCAL ? `file://${LOCAL}` : HOST, failed, results }, null, 2));
+// ════════════════════════════════════════════════════════════════════════════════════
+// EVERY PUBLISHED ARCHIVE MUST BE EDGE-CACHEABLE
+// ════════════════════════════════════════════════════════════════════════════════════
+//
+// The check that did not exist on 2026-08-10, and the reason three of five live slices had
+// been serving every tile from R2 origin for weeks with 49/51 probes green.
+//
+// Cloudflare will not cache an object over 512 MB (Free/Pro/Business). Measured that day:
+// massachusetts 442.5 MB HIT, kansas 482.6 MB HIT, utah 724.9 MB BYPASS, arizona 885.0 MB
+// BYPASS, florida 1162.6 MB BYPASS. Nothing was misconfigured — the objects publish
+// `immutable, max-age=31536000` and the zone rules are correct. They were simply too big,
+// and the whole point of the `.wta` packaging is an edge-cached directory plus ranges.
+//
+// PMTILES-SCOPING did ask for range behaviour to be measured, and it was — on
+// district-of-columbia (15 MB) and vermont (146 MB). Both sit under the ceiling. Baking whole
+// states walked past it, and nothing in this file was looking at a response header.
+//
+// So: assert on the HEADER, by value, for every archive the index advertises. Size alone
+// would be a proxy; `cf-cache-status` is the thing that actually decides whether a player's
+// tile comes from Boston or from an R2 bucket.
+const CF_MAX_CACHEABLE = 512 * 1024 * 1024;
+let cacheFailed = 0;
+const cacheRows = [];
+if (!LOCAL && HOST) {
+  try {
+    const idxRes = await fetch(`${HOST}/v5/archive/index.json`);
+    if (idxRes.ok) {
+      const idx = await idxRes.json();
+      for (const e of idx.slices ?? []) {
+        const res = await fetch(`${HOST}/${e.path}`, { headers: { Range: 'bytes=0-63' } });
+        const cc = res.headers.get('cf-cache-status') ?? '(none)';
+        const bad = [];
+        if (res.status !== 206) bad.push(`range returned ${res.status}, not 206`);
+        if (e.bytes > CF_MAX_CACHEABLE)
+          bad.push(`${e.bytes} B is over Cloudflare's ${CF_MAX_CACHEABLE} B cacheable ceiling — shard it`);
+        // MISS is fine and self-heals on the next request; BYPASS never does.
+        if (cc === 'BYPASS') bad.push(`cf-cache-status BYPASS — every tile here is served from origin`);
+        if (bad.length) cacheFailed++;
+        cacheRows.push({ slice: e.slice, bytes: e.bytes, status: res.status, cache: cc, bad });
+      }
+    }
+  } catch (err) {
+    cacheFailed++;
+    cacheRows.push({ slice: '(index)', bad: [`could not check archive caching: ${err.message}`] });
+  }
+}
+
+if (asJson) console.log(JSON.stringify({ host: LOCAL ? `file://${LOCAL}` : HOST, failed, results, cache: cacheRows }, null, 2));
 else {
+  if (cacheRows.length) {
+    console.log('\n== every published archive must be edge-cacheable ====================');
+    for (const c of cacheRows) {
+      const mb = c.bytes === undefined ? '' : `${(c.bytes / 1048576).toFixed(1)} MB`.padStart(10);
+      console.log(`${c.bad.length ? 'FAIL' : 'ok  '} ${String(c.slice).padEnd(18)}${mb}  ${c.cache ?? ''}`);
+      for (const b of c.bad) console.log(`       ↳ ${b}`);
+    }
+  }
   console.log(`\n${results.length - failed}/${results.length} probes passed against ${LOCAL ? `local pack ${LOCAL}` : HOST}`);
   if (skipped > 0) {
     console.log(
@@ -648,4 +743,4 @@ else {
   }
 }
 
-process.exit(failed ? 1 : 0);
+process.exit(failed || cacheFailed ? 1 : 0);
