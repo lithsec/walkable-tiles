@@ -140,6 +140,28 @@ phase "tags-filter"
 # only when non-empty — so a cell with no arterial hashes exactly as it did before and the
 # publish step skips it.
 #
+# ── REVISION 3 ADDITIONS (2026-08-10) ────────────────────────────────────────────────
+# `surface=` needs NO line, for exactly the reason `lit` and `access` need none: tags-filter
+# SELECTS objects and keeps every tag on the ones it selects, so it already arrives on every
+# way the `w/highway=` line matched. Adding `w/surface=*` would only widen the selection to
+# ways we do not walk.
+#
+# `natural=water` and `natural=wood` need no new line either — they are already selected for
+# LANDCOVER (`a/natural=wood,water`). Revision 3 only starts reading their `name`, which was
+# always in the extract and never in the output. Named lakes and named woods therefore cost
+# a filter change of zero and a re-bake of everything, which is the whole argument for
+# carrying every plausible field in one pass.
+#
+# What genuinely widens the selection: beaches and cliffs (`natural=`, and cliffs are ways as
+# often as areas), viewpoints, and the four `historic=` values that become monument/ruins.
+# All are small, sparse point-and-small-area classes.
+#
+# `w/waterway=river,stream,canal` is the one addition that is not a landmark. It closes the
+# gap Ausculta's `habitat.ts` names in the `water` class: OSM maps narrow rivers, streams and
+# canals as LINES, the bake took only `riverbank` POLYGONS, so a canal towpath — the most
+# water-ish walk in Britain — classified as nothing at all. The tiler still has to decide how
+# a line becomes cover; selecting it here is the half that costs a re-bake.
+#
 # `boundary=administrative` is deliberately absent too: it is the only thing that would
 # give a settlement's true EXTENT, and it is a relation-heavy geometry class an order
 # larger than everything else here. Settlements are carried as their centre NODE with a
@@ -156,7 +178,14 @@ osmium tags-filter --overwrite -o "$FILTERED" "$PBF" \
   n/amenity=library \
   n/place=city,town,village,hamlet,suburb \
   n/natural=peak \
-  a/boundary=national_park,protected_area
+  a/boundary=national_park,protected_area \
+  a/natural=beach,cliff \
+  w/natural=cliff \
+  n/tourism=viewpoint \
+  a/tourism=viewpoint \
+  n/historic=monument,memorial,ruins,archaeological_site \
+  a/historic=monument,memorial,ruins,archaeological_site \
+  w/waterway=river,stream,canal
 
 # ── THE TILER NOW REACHES THE NETWORK, and it is not the Geofabrik download ───────────
 # `mountain` (SPEC §10.4) and the peak-prominence score (§10.8) both read Copernicus GLO-30

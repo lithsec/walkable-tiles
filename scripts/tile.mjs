@@ -95,6 +95,20 @@ const LANDMARK_TIER = {
   common: 4,
   cemetery: 4,
   library: 4,
+  // ── Revision 3 ────────────────────────────────────────────────────────────────────
+  // Large named natural features join the parks at 4; they are the same order of thing a
+  // player would set out for, and area breaks the tie inside the tier, so a pond does not
+  // beat a park. The POINT features take a new tier 5 below everything — a viewpoint is a
+  // bench and a monument is a plinth, and neither should displace a cemetery when a tile
+  // runs out of slots. Appending tiers rather than renumbering keeps every existing kind's
+  // rank exactly where a baked tile already put it.
+  lake: 4,
+  wood: 4,
+  beach: 4,
+  cliff: 5,
+  viewpoint: 5,
+  monument: 5,
+  ruins: 5,
 };
 const PLACE_KINDS = new Set(['city', 'town', 'village', 'hamlet', 'suburb']);
 // A tier-0/1 landmark is a settlement; SETTLEMENTS_PER_TILE applies to exactly these.
@@ -176,6 +190,22 @@ const LANDMARK_SIG_REF_M2 = {
   // occupies it scored 4.23 and won the entire District, which is how this number got
   // measured rather than guessed.
   library: 1e4,
+  // Revision 3. The three AREA kinds get real references and can therefore anchor: a lake
+  // at the scale of a town pond (10 ha), a named wood at a nature reserve's (50 ha), a beach
+  // at a cemetery's (5 ha) since a named town beach is about that.
+  lake: 1e5,
+  wood: 5e5,
+  beach: 5e4,
+  // The four POINT kinds are `null` — cannot anchor at all — and that is the honest state
+  // rather than a placeholder. They have no footprint to measure, so any reference would be
+  // inventing a magnitude; `peak` gets away with `null` here only because `landmarkSig`
+  // scores it from `ele` instead, and these have no equivalent. They ride in tiles as NAMES.
+  // Making one anchorable is two decisions, not one: a scoring rule here, and the spoken
+  // lines Ausculta's `LANDMARK_NEAR_M` is waiting on before it will place anything at all.
+  cliff: null,
+  viewpoint: null,
+  monument: null,
+  ruins: null,
 };
 // A summit's significance comes from its LOCAL RELIEF, and the bridge to an area is
 // dimensional: at a fixed hillside slope a summit standing h metres above its own ground
@@ -492,7 +522,7 @@ function cell(key) {
   return c;
 }
 
-function addWay(id, points, foot, name, lit, access) {
+function addWay(id, points, foot, name, lit, access, surface) {
   const touched = new Set();
   for (const p of points) for (const k of cellsNear(p.lat, p.lng)) touched.add(k);
   for (const k of touched) {
@@ -501,7 +531,7 @@ function addWay(id, points, foot, name, lit, access) {
     // majority of ways and are only ever WRITTEN into the v5 payload (SPEC §10.6) —
     // the v4 write loop below spells its way objects out field by field, so v4 stays
     // byte-identical whatever is attached here.
-    if (!c.ways.has(id)) c.ways.set(id, { points, foot, name, lit, access });
+    if (!c.ways.has(id)) c.ways.set(id, { points, foot, name, lit, access, surface });
   }
 }
 
@@ -531,6 +561,24 @@ function wayLit(pr) {
 // mapped, which is not the same claim as "public" — it is the absence of one.
 function wayAccess(pr) {
   return ACCESS_KINDS.has(pr.access) ? pr.access : undefined;
+}
+
+// OSM `surface=*` -> the tag VERBATIM, or undefined. Revision 3.
+//
+// NOT NORMALISED, and not a whitelist, which is the one decision in this function. OSM
+// `surface` is an open vocabulary — asphalt, gravel, fine_gravel, compacted, ground, dirt,
+// grass, sett, paving_stones, and a long regional tail. Collapsing it to a closed set HERE
+// would bake today's guess about which distinctions matter into every tile in the world, and
+// a tile is baked whole. Ausculta's SENSING.md closes IMU surface classification and says
+// surface must come from OSM, so the tag IS the measurement; the consumer maps it to however
+// many buckets it needs, next to the rule that needs them, where changing it is free.
+//
+// Bounded rather than trusted: a pathological value cannot bloat a tile. Absent stays
+// UNKNOWN and must never be read as "paved" — the same abstention `wayLit` keeps, and it
+// matters more here, because `surface` coverage is thin and uneven.
+function waySurface(pr) {
+  const v = pr.surface;
+  return typeof v === 'string' && v.length > 0 && v.length <= 32 ? v : undefined;
 }
 
 function addCrossing(lat, lng) {
@@ -608,6 +656,25 @@ function landmarkKind(pr, areaM2) {
   if (pr.leisure === 'nature_reserve') return 'nature_reserve';
   if (pr.leisure === 'common') return 'common';
   if (pr.boundary === 'national_park') return 'protected_area';
+  // ── Revision 3, appended so no existing feature changes kind ───────────────────────
+  //
+  // Order inside this block is precedence among the NEW kinds only. Everything above still
+  // wins: a `leisure=nature_reserve` that is also `natural=wood` stays a nature_reserve, and
+  // a named lake inside a national park is still the park. Only features that used to fall
+  // through to `null` can land here, which is what makes this additive rather than a
+  // reclassification — the one revision-2 change that MOVED features between kinds is
+  // precisely the kind of thing this ordering avoids repeating.
+  //
+  // These become landmarks ONLY when named (`kind && pr.name` at the call sites), so the
+  // unnamed water and woodland that already ship as landcover are unaffected.
+  if (pr.natural === 'water' || pr.waterway === 'riverbank' || pr.landuse === 'reservoir')
+    return 'lake';
+  if (pr.natural === 'wood' || pr.landuse === 'forest') return 'wood';
+  if (pr.natural === 'beach') return 'beach';
+  if (pr.natural === 'cliff') return 'cliff';
+  if (pr.tourism === 'viewpoint') return 'viewpoint';
+  if (pr.historic === 'monument' || pr.historic === 'memorial') return 'monument';
+  if (pr.historic === 'ruins' || pr.historic === 'archaeological_site') return 'ruins';
   return null;
 }
 
@@ -926,6 +993,58 @@ function rasterizeCover(rings, field) {
 // Landcover/landmark area feature: simplify + area-threshold each polygon, then bin.
 // `pr` is carried through only so the landmark KIND can be settled once `totalArea` is
 // known — `national_park` is the one kind whose tags are not enough on their own.
+// ── WATERWAY LINES BECOME WATER COVER (revision 3) ───────────────────────────────────
+//
+// OSM maps narrow rivers, streams and canals as LINES; the bake only ever took `riverbank`
+// POLYGONS. So a canal towpath — the most water-ish walk there is — classified as nothing,
+// which Ausculta's `habitat.ts` records as a KNOWN GAP against its `water` class and marks
+// as new DATA rather than a threshold, i.e. costing a re-bake whichever revision closes it.
+// This is that revision.
+//
+// A polyline is turned into a RIBBON: walk the line offsetting each vertex to the left, then
+// back along it offsetting to the right, and close. One simple ring per way, fed through the
+// ordinary `addArea` path so it lands in `lcPolys` (the map draws the canal) and rasterises
+// into `amask` (the habitat classifier sees it) with no new machinery on either side.
+//
+// The offset is perpendicular to the MEAN of the two adjacent segment directions, which is
+// what keeps a bend from pinching the ribbon shut. A meander that crosses itself produces a
+// self-intersecting ring; that is tolerated rather than repaired, because the consumers are
+// an even-odd rasteriser and an area magnitude, and both degrade gracefully where a
+// general-purpose polygon offsetter would be several hundred lines to get right.
+//
+// HALF-WIDTHS ARE DELIBERATE UNDER-ESTIMATES. `waterFrac >= 0.25` decides the water class, so
+// a too-generous ribbon would classify whole neighbourhoods as waterside on the strength of a
+// culverted stream. OSM `width` is too sparsely tagged to rely on, so these are honest
+// defaults for the tag itself: a canal is a made channel, a river is wider than a stream.
+const WATERWAY_HALF_M = { river: 12, canal: 8, stream: 4 };
+
+function waterwayRibbon(coords, halfM) {
+  if (!Array.isArray(coords) || coords.length < 2) return null;
+  const cosLat = Math.cos((coords[0][1] * Math.PI) / 180) || 1e-6;
+  const dLat = halfM / M_PER_DEG;
+  const dLng = halfM / (M_PER_DEG * cosLat);
+
+  // Unit normal at each vertex, from the mean direction of the segments touching it.
+  const normals = coords.map((_, k) => {
+    const prev = coords[Math.max(0, k - 1)];
+    const next = coords[Math.min(coords.length - 1, k + 1)];
+    // Work in a locally-isotropic frame so a normal is perpendicular on the GROUND, not in
+    // degree space — otherwise the ribbon skews with latitude exactly as a sheared lattice does.
+    let vx = (next[0] - prev[0]) * cosLat;
+    let vy = next[1] - prev[1];
+    const len = Math.hypot(vx, vy);
+    if (!(len > 0)) return [0, 0];
+    vx /= len; vy /= len;
+    return [-vy, vx]; // left normal
+  });
+
+  const left = coords.map((c, k) => [c[0] + normals[k][0] * dLng, c[1] + normals[k][1] * dLat]);
+  const right = coords.map((c, k) => [c[0] - normals[k][0] * dLng, c[1] - normals[k][1] * dLat]);
+  right.reverse();
+  const ring = left.concat(right);
+  return ring.length >= 3 ? ring : null;
+}
+
 function addArea(g, cls, kind, name, pr) {
   const polys = g.type === 'Polygon' ? [g.coordinates] : g.coordinates;
   let totalArea = 0;
@@ -990,15 +1109,23 @@ for await (let line of rl) {
     const hw = pr.highway;
     if (WALK.has(hw)) {
       const points = g.coordinates.map((c) => ({ lat: c[1], lng: c[0] }));
-      // `lit` and `access` need NO osmium filter line: tags-filter SELECTS objects and
-      // keeps every tag on the ones it selects, so these already arrive on every way the
-      // highway filter matched. They cost a filter change of exactly zero.
-      addWay(id, points, FOOT.has(hw), pr.name || null, wayLit(pr), wayAccess(pr));
+      // `lit`, `access` and `surface` need NO osmium filter line: tags-filter SELECTS
+      // objects and keeps every tag on the ones it selects, so all three already arrive on
+      // every way the highway filter matched. They cost a filter change of exactly zero.
+      addWay(id, points, FOOT.has(hw), pr.name || null, wayLit(pr), wayAccess(pr), waySurface(pr));
       habAddWay(points, hw);
     } else if (HAZARD.has(hw)) {
       // Geometry only, and deliberately NOT fed to habAddWay: habitat describes ground a player
       // walks, and an arterial is the one thing this pipeline is certain they should not.
       addHazard(id, g.coordinates.map((c) => ({ lat: c[1], lng: c[0] })));
+    }
+    // Revision 3: a named or unnamed waterway line becomes water COVER. Deliberately after
+    // the highway branches — a way is a path or a watercourse, never both, and this keeps the
+    // walkable classification first in every reading of this block.
+    const wwHalf = WATERWAY_HALF_M[pr.waterway];
+    if (wwHalf !== undefined) {
+      const ring = waterwayRibbon(g.coordinates, wwHalf);
+      if (ring) addArea({ type: 'Polygon', coordinates: [ring] }, 'water', null, null, pr);
     }
     if (pr.footway === 'crossing' && g.coordinates.length) {
       const mid = g.coordinates[Math.floor(g.coordinates.length / 2)];
@@ -1438,6 +1565,7 @@ for (const key of v5Keys) {
       const way = { points: w.points, foot: w.foot };
       if (w.lit !== undefined) way.lit = w.lit;
       if (w.access !== undefined) way.access = w.access;
+      if (w.surface !== undefined) way.surface = w.surface;
       ways.push(way);
       names.push(w.name);
     }
