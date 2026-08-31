@@ -1,0 +1,40 @@
+// Cloudflare Worker config for the per-cell tile server (see worker/README.md).
+//
+// Deploy is deliberately manual: fill in the two placeholders, then `wrangler deploy`
+// from this directory. Nothing in the bake pipeline references this file.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "walkable-tiles",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-08-31",
+
+  // ── placeholders — fill in before deploying ──────────────────────────────────────
+  // Your Cloudflare account id (dashboard → Workers & Pages → right sidebar).
+  "account_id": "YOUR_ACCOUNT_ID",
+
+  "r2_buckets": [
+    {
+      // The Worker code reads `env.TILES`; do not rename the binding.
+      "binding": "TILES",
+      // The bucket the bake publishes to (the one behind tiles.walktiles.xyz).
+      "bucket_name": "YOUR_BUCKET_NAME"
+    }
+  ],
+
+  // ── route ────────────────────────────────────────────────────────────────────────
+  // Uncomment to attach the Worker to the live tile host. A Worker route on a hostname
+  // takes precedence over the R2 custom domain on the same hostname, so this is the
+  // moment the Worker goes live — leave it commented until you mean it.
+  //
+  // "routes": [
+  //   { "pattern": "tiles.walktiles.xyz/*", "zone_name": "walktiles.xyz" }
+  // ],
+
+  // Optional soft token gate (HOSTING.md §5). NEVER put the token here — it is a
+  // secret: `wrangler secret put TILES_TOKEN`. When the secret is unset the Worker
+  // serves openly, which is today's behavior.
+
+  "observability": {
+    "enabled": true
+  }
+}
