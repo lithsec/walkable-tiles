@@ -103,16 +103,34 @@ fi
 
 if [ "$UPLOAD_ONLY" != "1" ]; then
 phase "download $URL"
-curl -fsSL --retry 3 "$URL" -o "$PBF"
+# `curl -f --retry` is NOT enough here: under load Geofabrik answers cloud IP ranges with
+# an HTTP 200 whose body is an HTML "please wait" page. curl exits 0 in two seconds, and
+# the failure surfaces twenty minutes later as osmium's "invalid BlobHeader size" — the
+# england slice of the first force_all run died exactly this way. So validate the FILE,
+# not the transfer: `osmium fileinfo` reads just the header and rejects anything that is
+# not a PBF, and a bad body is retried with growing jitter instead of being handed on.
+DL_OK=0
+for DL_ATTEMPT in 1 2 3 4 5; do
+  if curl -fsSL --retry 3 "$URL" -o "$PBF" && osmium fileinfo "$PBF" >/dev/null 2>&1; then
+    DL_OK=1; break
+  fi
+  echo "[$NAME] download attempt $DL_ATTEMPT invalid (bad HTTP or not a PBF) — backing off"
+  sleep $((DL_ATTEMPT * 30 + RANDOM % 30))
+done
+[ "$DL_OK" = 1 ] || { echo "[$NAME] $URL failed validation after 5 attempts" >&2; exit 1; }
 
-# Geofabrik ships <region>.poly beside the .pbf — precise ownership boundary.
+# Geofabrik ships <region>.poly beside the .pbf — precise ownership boundary. The same
+# 200-with-HTML failure mode applies, and a poisoned poly is WORSE than a missing one
+# (silently wrong ownership beats a loud crash), so require the poly grammar's closing
+# END before trusting it.
 POLY_ARG=()
 POLY_URL="${URL%-latest.osm.pbf}.poly"
-if curl -fsSL --retry 2 "$POLY_URL" -o "$WORK/slice.poly" 2>/dev/null; then
+if curl -fsSL --retry 2 "$POLY_URL" -o "$WORK/slice.poly" 2>/dev/null \
+  && grep -q '^END' "$WORK/slice.poly"; then
   POLY_ARG=(--poly "$WORK/slice.poly")
   echo "[$NAME] using poly ownership"
 else
-  echo "[$NAME] no .poly found — falling back to full-extent ownership (may double-write seams)"
+  echo "[$NAME] no valid .poly — falling back to full-extent ownership (may double-write seams)"
 fi
 
 phase "tags-filter"
