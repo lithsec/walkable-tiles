@@ -64,7 +64,13 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.count != '0' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # Sized by measurement, not hope: new-south-wales (250 MB pbf) took 41 min on a
+    # hosted runner end to end. Texas is the largest single slice we bake (~800 MB pbf,
+    # california ships as norcal/socal leaves precisely so it never gets this big) and
+    # scales that to roughly 2.5-3 h with DEM fetch on a cold cache. 330 leaves margin
+    # under the 360-min hosted-runner ceiling; a slice that outruns THIS needs splitting,
+    # not more timeout.
+    timeout-minutes: 330
     strategy:
       fail-fast: false # one slice failing must not abort the others
       max-parallel: 16
