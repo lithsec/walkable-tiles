@@ -10,25 +10,26 @@
 
   // ── placeholders — fill in before deploying ──────────────────────────────────────
   // Your Cloudflare account id (dashboard → Workers & Pages → right sidebar).
-  "account_id": "YOUR_ACCOUNT_ID",
+  "account_id": "d2f2c82899a61788f0072bbcaf593ce3",
 
   "r2_buckets": [
     {
       // The Worker code reads `env.TILES`; do not rename the binding.
       "binding": "TILES",
       // The bucket the bake publishes to (the one behind tiles.walktiles.xyz).
-      "bucket_name": "YOUR_BUCKET_NAME"
+      "bucket_name": "cologra-tiles"
     }
   ],
 
   // ── route ────────────────────────────────────────────────────────────────────────
-  // Uncomment to attach the Worker to the live tile host. A Worker route on a hostname
-  // takes precedence over the R2 custom domain on the same hostname, so this is the
-  // moment the Worker goes live — leave it commented until you mean it.
-  //
-  // "routes": [
-  //   { "pattern": "tiles.walktiles.xyz/*", "zone_name": "walktiles.xyz" }
-  // ],
+  // A Worker route on a hostname takes precedence over the R2 custom domain on the
+  // same hostname, so deploying with this attached is the moment the Worker goes live.
+  // Attached 2026-08-31, user-approved, after the workers.dev battery passed: archive
+  // resolution (Columbus byte-parity with a direct resolve), legacy passthrough
+  // (Boston), v5/index passthrough, ocean 404, header parity with the legacy objects.
+  "routes": [
+    { "pattern": "tiles.walktiles.xyz/*", "zone_name": "walktiles.xyz" }
+  ],
 
   // Optional soft token gate (HOSTING.md §5). NEVER put the token here — it is a
   // secret: `wrangler secret put TILES_TOKEN`. When the secret is unset the Worker
