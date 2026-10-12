@@ -26,6 +26,13 @@
 #                                calibration loop would then re-download hundreds of MB per
 #                                run. Cold-cache cost, measured: district-of-columbia
 #                                11.7 MB, vermont 255.2 MB (SPEC §10.9).
+#   SLICE_CLIP=minLng,minLat,maxLng,maxLat
+#                                own only cells inside this box as well as inside the poly
+#                                (half-open on the max edges). Set from a slices.json row's
+#                                `clip`, and it exists for an extract that straddles the
+#                                antimeridian (Alaska), which is baked as two slices from one
+#                                URL, one clip each — see CLIP in tile.mjs for what an
+#                                unclipped straddle costs.
 #   DEM_DISABLE=1                bake with NO elevation source. No cell classifies
 #                                `mountain` and no named peak can rank as an anchor. Both
 #                                are absences and neither is visible in the output, so the
@@ -213,8 +220,13 @@ osmium tags-filter --overwrite -o "$FILTERED" "$PBF" \
 # aborts, because a half-read elevation source silently un-classifies a mountain range.
 phase "export + tile"
 mkdir -p "$OUT"
+# `${ARR[@]+…}` rather than `"${ARR[@]}"`: bash 3.2 (macOS) treats an EMPTY array as unset
+# under `set -u`, and the clip is empty for every slice but the split ones.
+CLIP_ARG=()
+if [ -n "${SLICE_CLIP:-}" ]; then CLIP_ARG=(--clip "$SLICE_CLIP"); echo "[$NAME] clip $SLICE_CLIP"; fi
 osmium export "$FILTERED" -f geojsonseq --add-unique-id=type_id -o - \
-  | node --max-old-space-size=12288 "$(dirname "$0")/tile.mjs" --out "$OUT" --slice "$NAME" "${POLY_ARG[@]}"
+  | node --max-old-space-size=12288 "$(dirname "$0")/tile.mjs" --out "$OUT" --slice "$NAME" \
+      ${POLY_ARG[@]+"${POLY_ARG[@]}"} ${CLIP_ARG[@]+"${CLIP_ARG[@]}"}
 fi
 
 # NB these count the whole OUT tree, which for a local multi-slice seed accumulates

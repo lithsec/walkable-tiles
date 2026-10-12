@@ -247,16 +247,23 @@ export class Dem {
    * from a hardcoded latitude table, because the published band edges and the archive's
    * actual ones do not agree (the handbook says 5" above 75°; N76 measures 1200, i.e. 3").
    * `null` means no tile in that range at all, which is the sea and is an answer.
+   *
+   * Only a WIDTH is cached, never a `null`. The width is a property of the latitude band
+   * alone, so the first tile found answers for every longitude; "no tile in [lngLo, lngHi]"
+   * answers for that range only, and the cache is keyed by band. Caching it let one peak
+   * whose ±1° happened to be sea blind every later caller in the same band — headers are
+   * cached separately, so asking again costs no round trip.
    */
   async bandWidth(tileLat, lngLo, lngHi) {
     if (this.bands.has(tileLat)) return this.bands.get(tileLat);
-    let W = null;
     for (let tLng = Math.floor(lngLo); tLng <= Math.floor(lngHi); tLng++) {
       const ifd = await this.header(demTileName(tileLat, tLng));
-      if (ifd) { W = ifd.width; break; }
+      if (ifd) {
+        this.bands.set(tileLat, ifd.width);
+        return ifd.width;
+      }
     }
-    this.bands.set(tileLat, W);
-    return W;
+    return null;
   }
 
   async block(name, bi) {
@@ -384,32 +391,60 @@ export class Dem {
    * The window is a disc in METRES, the same rule as `buildReliefGrid` one grid finer. A
    * square counted in POSTS would be 39% wider than tall at 44°N — and above 50°N, where
    * columns are decimated, it would be narrower than tall. Neither is a disc.
+   *
+   * ── A WINDOW CAN SPAN TWO LATTICES, and this is where it bit ────────────────────────
+   *
+   * The column count is per 1° BAND (N59 is 2400 wide, N60 is 1800), and a 8 km disc
+   * around a summit within 8 km of a band edge reads rows from both. This used to take
+   * the summit's own band width for every row, so the first such peak threw
+   * `N60_00_W002_00 is 1800 wide, caller assumed 2400` — scotland, CI run 38201560921,
+   * twenty minutes after its relief grid (which already resolves W per row) had finished.
+   * Had `elevPost` not checked W it would have read N60 on N59's lattice: the wrong
+   * column, the wrong place, a plausible float — the failure the file header describes.
+   *
+   * So every ROW resolves its own band's W, its own post column for the summit's longitude
+   * and its own disc half-width in posts. The disc in metres does not change; only how
+   * many posts make it up. Within one band every term is what it was — the same `ry`, the
+   * same `rx` from `reliefWindow`, the same `kx` — so a summit clear of a band edge scores
+   * exactly as it always has.
    */
   async dropAtPoint(lat, lng, radiusM, mPerDeg) {
     const ky = Math.round(lat * DEM_ROWS_PER_DEG);
     const W = await this.bandWidth(tileLatOf(ky), lng - 1, lng + 1);
     if (!W) return NaN;
     const postNS = mPerDeg / DEM_ROWS_PER_DEG;
-    const postEW = (mPerDeg / W) * Math.cos((lat * Math.PI) / 180);
-    const { ry, rx } = reliefWindow(radiusM, postNS, postEW);
+    const cosLat = Math.cos((lat * Math.PI) / 180);
+    const ry = Math.ceil(radiusM / postNS);
+    // band -> { W, rx, kx } for every band the window's rows touch; `null` for a band with
+    // no tile near here (sea), whose rows are skipped exactly as a missing tile's posts are.
+    const lattice = new Map();
+    let halfDeg = 0;
+    for (let b = tileLatOf(ky - ry); b <= tileLatOf(ky + ry); b++) {
+      const Wb = await this.bandWidth(b, lng - 1, lng + 1);
+      if (!Wb) { lattice.set(b, null); continue; }
+      const { rx } = reliefWindow(radiusM, postNS, (mPerDeg / Wb) * cosLat);
+      lattice.set(b, { W: Wb, rx, kx: Math.round(lng * Wb) });
+      halfDeg = Math.max(halfDeg, (rx[0] + 1) / Wb);
+    }
     await this.ensureBox(
-      lng - (rx[0] + 1) / W, lng + (rx[0] + 1) / W,
+      lng - halfDeg, lng + halfDeg,
       lat - (ry + 1) / DEM_ROWS_PER_DEG, lat + (ry + 1) / DEM_ROWS_PER_DEG,
     );
-    const kx = Math.round(lng * W);
     // The summit's own post, not the window's max: a peak node a few tens of metres off
     // the true top costs a metre or two here (Mount Mansfield's node reads 1333.3 against
     // 1334.3 for the best post within 600 m), whereas taking the max would let the node
     // claim any higher ground that happens to be near it — the very thing DROP exists to
     // stop, reintroduced at the other end.
-    const self = this.elevPost(kx, ky, W);
+    const self = this.elevPost(Math.round(lng * W), ky, W);
     if (Number.isNaN(self)) return NaN;
     let lo = Infinity;
     for (let dy = -ry; dy <= ry; dy++) {
-      const r = rx[Math.abs(dy)];
+      const L = lattice.get(tileLatOf(ky + dy));
+      if (!L) continue;
+      const r = L.rx[Math.abs(dy)];
       if (r < 0) continue;
-      for (let x = kx - r; x <= kx + r; x++) {
-        const e = this.elevPost(x, ky + dy, W);
+      for (let x = L.kx - r; x <= L.kx + r; x++) {
+        const e = this.elevPost(x, ky + dy, L.W);
         if (!Number.isNaN(e) && e < lo) lo = e;
       }
     }
@@ -567,7 +602,40 @@ export async function buildReliefGrid(dem, { cxLo, cxHi, cyLo, cyHi, cellDeg, mP
 // are ABOVE 50°N on purpose — that is where longitude decimation lives, and reading a
 // 2400-wide tile as if it were 3600 wide returned real-looking elevations from the wrong
 // place and reported the Lake District as flat.
+//
+// The first case is OFFLINE and synthetic, and it is the one a real archive cannot give on
+// demand: a summit whose drop window spans TWO longitude lattices. Two fake tiles at the
+// real N59/N60 widths (2400 / 1800 — the pair scotland died on), N59 at 100 m, N60 at
+// 50 m, one 300 m post under the summit 0.03° south of the line. The only route to the
+// answer 250 is reading N60's rows on N60's lattice; taking the summit's W for every row
+// throws, and a fix that silently skipped the foreign band would answer 200.
+// `node scripts/dem.mjs --offline` runs only this case.
 if (import.meta.url === `file://${process.argv[1]}`) {
+  let bad = 0;
+  {
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const fake = new Dem({ cacheDir: mkdtempSync(join(tmpdir(), 'dem-selfcheck-')) });
+    const lat = 59.97, lng = -1.5, TILE_H = 360;
+    for (const [band, W, ground] of [[59, 2400, 100], [60, 1800, 50]]) {
+      for (const tLng of [-3, -2, -1]) {
+        const name = demTileName(band, tLng);
+        const ifd = { width: W, height: DEM_ROWS_PER_DEG, tileW: W, tileH: TILE_H, offsets: [], counts: [] };
+        fake.headers.set(name, ifd);
+        for (let bi = 0; bi < DEM_ROWS_PER_DEG / TILE_H; bi++)
+          fake.blocks.set(`${name}/${bi}`, new Float32Array(W * TILE_H).fill(ground));
+      }
+    }
+    const ky = Math.round(lat * DEM_ROWS_PER_DEG), kx = Math.round(lng * 2400);
+    const row = DEM_ROWS_PER_DEG * 60 - ky, col = kx - -2 * 2400;
+    fake.blocks.get(`${demTileName(59, -2)}/${Math.floor(row / TILE_H)}`)[(row % TILE_H) * 2400 + col] = 300;
+    let got;
+    try { got = await fake.dropAtPoint(lat, lng, 8000, 111320); } catch (e) { got = e.message; }
+    const ok = got === 250;
+    if (!ok) bad++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'} drop window across N59|N60 (2400|1800 wide): ${got}, expected 250`);
+  }
+  if (process.argv.includes('--offline')) process.exit(bad ? 1 : 0);
   const dem = new Dem({});
   const cases = [
     ['Mount Mansfield, VT   (44°N)', 44.543947, -72.81431, 1339, 40],
@@ -576,7 +644,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     ['Skiddaw, Cumbria      (54°N)', 54.649722, -3.144167, 931, 40],
     ['Åreskutan, Sweden     (63°N)', 63.426, 13.0819, 1420, 45],
   ];
-  let bad = 0;
   for (const [what, lat, lng, expect, tol] of cases) {
     const ky = Math.round(lat * DEM_ROWS_PER_DEG);
     const W = await dem.bandWidth(tileLatOf(ky), lng - 1, lng + 1);

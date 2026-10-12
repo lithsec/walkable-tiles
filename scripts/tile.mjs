@@ -23,9 +23,12 @@
 // regional cap kept — SPEC.md §10.8).
 //
 // Usage: node tile.mjs --out <dir> [--slice <name>] [--poly <file> | --bbox minLng,minLat,maxLng,maxLat]
+//                     [--clip minLng,minLat,maxLng,maxLat]
 // Ownership: a cell is WRITTEN by this slice iff its center is inside the poly/bbox,
 // so exactly one slice writes each cell even though Geofabrik extracts overlap at seams.
 // The habitat sidecar applies the same rule at spawn-cell granularity.
+// `--clip` narrows that further (poly/bbox AND clip, half-open) — it is how one Geofabrik
+// extract that straddles the antimeridian becomes two slices; see CLIP below.
 import readline from 'node:readline';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -468,9 +471,46 @@ else if (bboxArg) {
   bbox = { minLng: b[0], minLat: b[1], maxLng: b[2], maxLat: b[3] };
 }
 
+// ── CLIP: ONE EXTRACT, SEVERAL SLICES, AND THE ANTIMERIDIAN IS WHY ─────────────────────
+//
+// Geofabrik's Alaska straddles 180°: its .poly is two rings, the state at -180..-129.8 and
+// the western Aleutians (Attu, Kiska, Amchitka, Semisopochnoi) at +171.8..+180. Nothing in
+// this pipeline wraps longitude, so every rectangle derived from such a slice — the DEM
+// relief grid, the habitat atlas raster, the archive bbox and its coverage bitmap — runs
+// from -180 to +180 the long way round. Measured on the one CI bake Alaska ever got
+// (run 35499800198): v4 written in 3 min, then the relief grid's spawn-cell rectangle was
+// ~240,000 x 13,500 cells (four float32 arrays of ~13 GB each) and its DEM fetch covered
+// the 51–71°N band of the whole planet; it logged `dem: sampled 40%` 2 h 24 min after v4
+// and the runner was shut down 25 min later, exit 143. Had it finished, the atlas every
+// player fetches whole would have been ~1.6 MB instead of ~0.2 MB, and the index entry's
+// bbox would have put Alaska's coverage bitmap in the path of every lookup between 51° and
+// 71°N — London included.
+//
+// So a straddling extract is baked as TWO slices, each owning one side: same URL, same
+// .poly, a different clip. Ownership is poly AND clip, HALF-OPEN on the max edges, so two
+// clips that share an edge partition it and SPEC §4's exactly-one-writer rule holds
+// without a cell centre ever having to avoid the line. Each slice still READS the whole
+// extract — a refuge relation whose islands lie on both sides is one feature, and both
+// slices list it identically — and only the derived rectangles are restricted (see the
+// elevation pass). Clipping the PBF with `osmium extract -b` instead was tried and rejected:
+// under `complete_ways` the relation arrives incomplete and its area is silently not built
+// (both Aleutian refuges vanished from the export), and under `smart` it arrives complete,
+// far islands and all, which is the straddle again.
+const clipArg = opt('--clip');
+let clip = null;
+if (clipArg) {
+  const b = clipArg.split(',').map(Number);
+  if (b.length !== 4 || !b.every(Number.isFinite) || b[0] >= b[2] || b[1] >= b[3])
+    throw new Error(`--clip wants minLng,minLat,maxLng,maxLat with min < max, got "${clipArg}"`);
+  clip = { minLng: b[0], minLat: b[1], maxLng: b[2], maxLat: b[3] };
+}
+const inClip = (lat, lng) =>
+  !clip || (lng >= clip.minLng && lng < clip.maxLng && lat >= clip.minLat && lat < clip.maxLat);
+
 const cellCenter = (i, j) => ({ lat: (i + 0.5) * TILE_DEG, lng: (j + 0.5) * TILE_DEG });
 
 function ownsLatLng(lat, lng) {
+  if (!inClip(lat, lng)) return false;
   if (ownRings) return pointInRings(lng, lat, ownRings);
   if (bbox) return lat >= bbox.minLat && lat <= bbox.maxLat && lng >= bbox.minLng && lng <= bbox.maxLng;
   return true; // unconstrained -> own everything (single-slice local test)
@@ -1362,15 +1402,26 @@ function buildHabitat(i, j) {
 // `owns()`. A spherical-shoelace formula would instead have to agree with the winding of
 // every Geofabrik .poly, and one `!hole` ring taken the wrong way round would be a silent
 // factor of two in the anchor count. This integrates what the ownership test actually says.
+// A `--clip` is part of the ownership test, so it is part of this integral too: the western
+// Aleutians' poly ring is ~190,000 km² of mostly sea, and counting the WHOLE poly for each
+// half of a split extract would hand both halves the cap of the whole.
 function sliceAreaKm2() {
-  if (bbox)
+  if (bbox) {
+    const b = clip
+      ? {
+          minLng: Math.max(bbox.minLng, clip.minLng), maxLng: Math.min(bbox.maxLng, clip.maxLng),
+          minLat: Math.max(bbox.minLat, clip.minLat), maxLat: Math.min(bbox.maxLat, clip.maxLat),
+        }
+      : bbox;
+    if (b.maxLng <= b.minLng || b.maxLat <= b.minLat) return 0;
     return (
-      ((bbox.maxLng - bbox.minLng) *
-        mPerDegLng((bbox.minLat + bbox.maxLat) / 2) *
-        (bbox.maxLat - bbox.minLat) *
+      ((b.maxLng - b.minLng) *
+        mPerDegLng((b.minLat + b.maxLat) / 2) *
+        (b.maxLat - b.minLat) *
         M_PER_DEG) /
       1e6
     );
+  }
   if (!ownRings) return null; // unconstrained local test — no count cap (see selectAnchors)
   let minLat = Infinity, maxLat = -Infinity;
   for (const r of ownRings)
@@ -1383,6 +1434,7 @@ function sliceAreaKm2() {
   for (let i = Math.floor(minLat / SLICE_AREA_STEP_DEG); i <= Math.floor(maxLat / SLICE_AREA_STEP_DEG); i++) {
     const y = (i + 0.5) * SLICE_AREA_STEP_DEG;
     if (y < minLat || y > maxLat) continue;
+    if (clip && (y < clip.minLat || y >= clip.maxLat)) continue;
     const xs = [];
     for (const r of ownRings)
       for (let a = 0; a < r.length; a++) {
@@ -1392,7 +1444,11 @@ function sliceAreaKm2() {
       }
     xs.sort((p, q) => p - q);
     let dLng = 0;
-    for (let k = 0; k + 1 < xs.length; k += 2) dLng += xs[k + 1] - xs[k];
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      const xa = clip ? Math.max(xs[k], clip.minLng) : xs[k];
+      const xb = clip ? Math.min(xs[k + 1], clip.maxLng) : xs[k + 1];
+      if (xb > xa) dLng += xb - xa;
+    }
     m2 += dLng * mPerDegLng(y) * SLICE_AREA_STEP_DEG * M_PER_DEG;
   }
   return m2 / 1e6;
@@ -1501,28 +1557,51 @@ if (DEM_OFF) {
   for (const k of hab.keys()) {
     const c = k.indexOf(':');
     const cx = Number(k.slice(0, c)), cy = Number(k.slice(c + 1));
+    // Under a clip, the far side's spawn cells exist (the extract is read whole — see CLIP)
+    // but are never written by this slice, so they must not stretch the rectangle: one far
+    // island is exactly what turned Alaska's grid into a ring round the planet. Without a
+    // clip `inClip` is true and this rectangle is the one every published slice was baked
+    // with, so their relief window (taken from its middle row) does not move.
+    if (!inClip((cy + 0.5) * CELL_DEG, (cx + 0.5) * CELL_DEG)) continue;
     if (cx < cxLo) cxLo = cx;
     if (cx > cxHi) cxHi = cx;
     if (cy < cyLo) cyLo = cy;
     if (cy > cyHi) cyHi = cy;
   }
-  const t0 = Date.now();
-  let lastPct = -1;
-  reliefGrid = await buildReliefGrid(dem, {
-    cxLo, cxHi, cyLo, cyHi,
-    cellDeg: CELL_DEG,
-    mPerDeg: M_PER_DEG,
-    radiusM: MOUNTAIN_RELIEF_R_M,
-    onBand: (done, total) => {
-      const pct = Math.floor((10 * done) / total) * 10;
-      if (pct > lastPct) { lastPct = pct; console.error(`[tile] dem: sampled ${pct}%`); }
-    },
-  });
-  console.error(
-    `[tile] relief: ${reliefGrid.cols}x${reliefGrid.rows} cells, disc r=${MOUNTAIN_RELIEF_R_M} m ` +
-      `(${reliefGrid.ry} rows x ${reliefGrid.rx[0]} cols at the widest), ` +
-      `${((Date.now() - t0) / 1000).toFixed(1)}s`,
-  );
+  // The guard that would have saved Alaska three runner-hours: a rectangle wider than half
+  // the planet is not a region, it is a slice whose two ends sit either side of ±180 and
+  // which nothing downstream can represent (CLIP, above). Fail in seconds, by name, rather
+  // than spend the runner on DEM tiles from Siberia and Labrador.
+  const spanDeg = (cxHi - cxLo + 1) * CELL_DEG;
+  if (!Number.isFinite(spanDeg)) {
+    // Every spawn cell with data lies outside the clip: nothing this slice writes has a
+    // relief to compute. Abstain, as for an empty slice; peaks below are per-point.
+    console.error('[tile] no spawn cell inside --clip carries data — relief grid skipped');
+  } else if (spanDeg > 180)
+    throw new Error(
+      `[tile] ${SLICE}: spawn cells span ${spanDeg.toFixed(1)}° of longitude ` +
+        `(${(cxLo * CELL_DEG).toFixed(2)}..${((cxHi + 1) * CELL_DEG).toFixed(2)}) — the slice straddles ` +
+        `the antimeridian. Bake it as two slices with a "clip" each (slices.json; tile.mjs CLIP).`,
+    );
+  else {
+    const t0 = Date.now();
+    let lastPct = -1;
+    reliefGrid = await buildReliefGrid(dem, {
+      cxLo, cxHi, cyLo, cyHi,
+      cellDeg: CELL_DEG,
+      mPerDeg: M_PER_DEG,
+      radiusM: MOUNTAIN_RELIEF_R_M,
+      onBand: (done, total) => {
+        const pct = Math.floor((10 * done) / total) * 10;
+        if (pct > lastPct) { lastPct = pct; console.error(`[tile] dem: sampled ${pct}%`); }
+      },
+    });
+    console.error(
+      `[tile] relief: ${reliefGrid.cols}x${reliefGrid.rows} cells, disc r=${MOUNTAIN_RELIEF_R_M} m ` +
+        `(${reliefGrid.ry} rows x ${reliefGrid.rx[0]} cols at the widest), ` +
+        `${((Date.now() - t0) / 1000).toFixed(1)}s`,
+    );
+  }
   // Peaks, sorted south-to-north so consecutive lookups share COG blocks — the same
   // locality the band loop above relies on, applied to a scattered set.
   const peaks = [...anchorCands.values()]

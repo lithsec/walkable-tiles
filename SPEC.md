@@ -67,6 +67,19 @@ region.** Implementation in `bake-slice.sh` / `tile.mjs`:
 - Consequence: every cell is written by exactly one slice → deterministic,
   no double writes, no cross-slice race. A cell whose center sits in an un-listed
   region simply isn't baked yet → app 404 → Overpass fallback.
+- **`clip` — one extract, two slices, for the antimeridian.** A `slices.json` row may
+  carry `"clip": "minLng,minLat,maxLng,maxLat"`; the region is then the poly **AND**
+  the clip, half-open on the max edges, so two rows sharing a URL and splitting at a
+  line partition the poly with every cell owned exactly once. It exists because
+  nothing in the format wraps longitude: Geofabrik's Alaska is one poly with a ring
+  at −180..−129.8 and another at +171.8..+180, and as ONE slice every derived
+  rectangle (DEM relief grid, habitat atlas, archive bbox and coverage bitmap) ran
+  −180..+180 the long way round — its only CI bake spent 2 h 49 min sampling DEM
+  for the whole 51–71°N band of the planet, reached 40%, and was shut down. So it bakes as
+  `alaska` (clip `-180,-90,0,90`) and `alaska-aleutians-west` (clip `0,-90,180,90`).
+  Each still reads the whole extract — a relation with islands on both sides is one
+  feature, listed identically by both — and `tile.mjs` refuses, in seconds, a slice
+  whose spawn cells span more than 180° of longitude.
 
 ## 5. Diff-gated upload (keeps writes ~zero)
 

@@ -87,7 +87,14 @@
   {
     "name": "alaska",
     "url": "https://download.geofabrik.de/north-america/us/alaska-latest.osm.pbf",
-    "day": 20
+    "day": 20,
+    "clip": "-180,-90,0,90"
+  },
+  {
+    "name": "alaska-aleutians-west",
+    "url": "https://download.geofabrik.de/north-america/us/alaska-latest.osm.pbf",
+    "day": 20,
+    "clip": "0,-90,180,90"
   },
   {
     "name": "arkansas",

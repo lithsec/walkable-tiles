@@ -98,6 +98,9 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          # Optional `clip` on a slices.json row; empty for every slice but the halves of an
+          # extract that straddles the antimeridian (bake-slice.sh SLICE_CLIP, tile.mjs CLIP).
+          SLICE_CLIP: ${{ matrix.clip }}
         run: ./scripts/bake-slice.sh "${{ matrix.url }}" "${{ matrix.name }}"
 
       - name: Upload run log

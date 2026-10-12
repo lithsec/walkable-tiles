@@ -49,10 +49,10 @@ mkdir -p "$BAKE_OUT"
 echo "keeping tiles in $BAKE_OUT (publish is repeatable from here; see R2_UPLOAD_ONLY)"
 
 bake_one() {
-  name="$1"; url="$2"
+  name="$1"; url="$2"; clip="$3"
   if [ -f "$STATE/$name.done" ]; then echo "skip  $name (already done)"; return 0; fi
   echo ">>>   $name"
-  if OUT_DIR="$BAKE_OUT/$name" "$DIR/bake-slice.sh" "$url" "$name" >"$STATE/$name.log" 2>&1; then
+  if SLICE_CLIP="$clip" OUT_DIR="$BAKE_OUT/$name" "$DIR/bake-slice.sh" "$url" "$name" >"$STATE/$name.log" 2>&1; then
     touch "$STATE/$name.done"
     echo "ok    $name"
   else
@@ -65,10 +65,13 @@ bake_one() {
 throttle() { while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$JOBS" ]; do sleep 2; done; }
 
 : >"$STATE/failures.txt" 2>/dev/null || true
-while IFS=$'\t' read -r name url; do
+# `clip` is optional and empty for nearly every row; it is how one straddling extract
+# becomes two slices (bake-slice.sh SLICE_CLIP). Dropping it here would bake BOTH halves
+# unclipped — each the whole straddle — so it rides along with name and url.
+while IFS=$'\t' read -r name url clip; do
   throttle
-  bake_one "$name" "$url" &
-done < <(jq -r '.[] | [.name, .url] | @tsv' "$SLICES")
+  bake_one "$name" "$url" "$clip" &
+done < <(jq -r '.[] | [.name, .url, (.clip // "")] | @tsv' "$SLICES")
 wait
 
 DONE=$(find "$STATE" -name '*.done' | wc -l | tr -d ' ')
