@@ -39,6 +39,10 @@ jobs:
           INPUT_SLICE: ${{ inputs.slice }}
           FORCE_ALL: ${{ inputs.force_all }}
         run: |
+          # A slice named `<other>-<1–2 letters>` would be read as one of <other>'s SHARDS by
+          # bake-slice.sh's family rule, and <other>'s publish would retire its sidecar.
+          CLASH=$(jq -r '[.[].name] as $n | $n[] as $a | $n[] | select(test("^" + $a + "-[a-z]{1,2}$")) | "\(.) looks like a shard of \($a)"' slices.json)
+          if [ -n "$CLASH" ]; then echo "$CLASH" >&2; exit 1; fi
           DOM=$(date -u +%-d)   # day-of-month, 1..31
           # Selection rules:
           #   workflow_dispatch.slice   -> just those (comma-separated). A list, because the

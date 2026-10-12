@@ -362,8 +362,15 @@ publish_archive() {
   # the indexes that still do.
   local PREVDIR="$WORK/prev-$VER"
   rm -rf "$PREVDIR"; mkdir -p "$PREVDIR"
+  # The FAMILY is the slice and its SHARDS — `<name>-<1–2 letters>` (pack-archives.mjs
+  # shardSuffix), the same rule step 4's retention regex uses — never `<name>-*`. A wildcard
+  # also caught every SIBLING slice whose name merely starts with this one, and step 2b
+  # then retired its sidecar as a "stale shard": `alaska` deleted `alaska-aleutians-west`
+  # from all three indexes on its first clipped publish (run 38212297706), and `georgia`
+  # and `sachsen` would have done the same to `georgia-country` and `sachsen-anhalt`.
   aws s3 cp "s3://$R2_BUCKET/$VER/archive/" "$PREVDIR" --recursive \
-    --exclude '*' --include "$NAME.idx.json" --include "$NAME-*.idx.json" --only-show-errors 2>/dev/null || true
+    --exclude '*' --include "$NAME.idx.json" \
+    --include "$NAME-[a-z].idx.json" --include "$NAME-[a-z][a-z].idx.json" --only-show-errors 2>/dev/null || true
   local PREVPATHS=""
   for f in "$PREVDIR"/*.idx.json; do
     [ -f "$f" ] || continue
