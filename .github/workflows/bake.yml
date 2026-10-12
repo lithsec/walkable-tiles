@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       slice:
-        description: 'Bake a single slice now (name from slices.json), ignoring its day'
+        description: 'Bake these slices now (names from slices.json, comma-separated), ignoring their day'
         required: false
         type: string
       force_all:
@@ -41,7 +41,9 @@ jobs:
         run: |
           DOM=$(date -u +%-d)   # day-of-month, 1..31
           # Selection rules:
-          #   workflow_dispatch.slice   -> just that one
+          #   workflow_dispatch.slice   -> just those (comma-separated). A list, because the
+          #                                concurrency group keeps only ONE pending run: four
+          #                                single-slice dispatches in a row would cancel three.
           #   force_all                 -> every slice
           #   otherwise                 -> slices whose "day" == today (clamped to 28)
           jq -c \
@@ -50,7 +52,7 @@ jobs:
             --arg force "$FORCE_ALL" '
             [ .[]
               | select(
-                  ($only != "" and .name == $only)
+                  ($only != "" and (.name as $n | $only | split(",") | map(gsub("^ +| +$"; "")) | index($n) != null))
                   or ($only == "" and $force == "true")
                   or ($only == "" and $force != "true" and (.day == (if $dom > 28 then 28 else $dom end)))
                 )
