@@ -80,6 +80,10 @@ region.** Implementation in `bake-slice.sh` / `tile.mjs`:
   Each still reads the whole extract — a relation with islands on both sides is one
   feature, listed identically by both — and `tile.mjs` refuses, in seconds, a slice
   whose spawn cells span more than 180° of longitude.
+  The same split serves an extract too big for one runner: Brazil's `sudeste` (822 MB,
+  São Paulo + Rio + Belo Horizonte, with no Geofabrik sub-extracts) bakes as
+  `sudeste-west` / `sudeste-east` split at −45.5°, so each half samples DEM and writes
+  tiles for half the area, though both still read the whole pbf.
 
 ## 5. Diff-gated upload (keeps writes ~zero)
 

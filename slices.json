@@ -1310,5 +1310,72 @@
     "name": "zlinsky",
     "url": "https://download.geofabrik.de/europe/czech-republic/zlinsky-latest.osm.pbf",
     "day": 19
+  },
+  {
+    "name": "chubu",
+    "url": "https://download.geofabrik.de/asia/japan/chubu-latest.osm.pbf",
+    "day": 28
+  },
+  {
+    "name": "chugoku",
+    "url": "https://download.geofabrik.de/asia/japan/chugoku-latest.osm.pbf",
+    "day": 7
+  },
+  {
+    "name": "hokkaido",
+    "url": "https://download.geofabrik.de/asia/japan/hokkaido-latest.osm.pbf",
+    "day": 23
+  },
+  {
+    "name": "kansai",
+    "url": "https://download.geofabrik.de/asia/japan/kansai-latest.osm.pbf",
+    "day": 12
+  },
+  {
+    "name": "kyushu",
+    "url": "https://download.geofabrik.de/asia/japan/kyushu-latest.osm.pbf",
+    "day": 22
+  },
+  {
+    "name": "shikoku",
+    "url": "https://download.geofabrik.de/asia/japan/shikoku-latest.osm.pbf",
+    "day": 15
+  },
+  {
+    "name": "tohoku",
+    "url": "https://download.geofabrik.de/asia/japan/tohoku-latest.osm.pbf",
+    "day": 13
+  },
+  {
+    "name": "centro-oeste",
+    "url": "https://download.geofabrik.de/south-america/brazil/centro-oeste-latest.osm.pbf",
+    "day": 23
+  },
+  {
+    "name": "nordeste",
+    "url": "https://download.geofabrik.de/south-america/brazil/nordeste-latest.osm.pbf",
+    "day": 23
+  },
+  {
+    "name": "norte",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 27
+  },
+  {
+    "name": "sul",
+    "url": "https://download.geofabrik.de/south-america/brazil/sul-latest.osm.pbf",
+    "day": 11
+  },
+  {
+    "name": "sudeste-west",
+    "url": "https://download.geofabrik.de/south-america/brazil/sudeste-latest.osm.pbf",
+    "day": 8,
+    "clip": "-180,-90,-45.5,90"
+  },
+  {
+    "name": "sudeste-east",
+    "url": "https://download.geofabrik.de/south-america/brazil/sudeste-latest.osm.pbf",
+    "day": 18,
+    "clip": "-45.5,-90,180,90"
   }
 ]
