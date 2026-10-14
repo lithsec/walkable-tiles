@@ -1357,11 +1357,6 @@
     "day": 23
   },
   {
-    "name": "norte",
-    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
-    "day": 27
-  },
-  {
     "name": "sul",
     "url": "https://download.geofabrik.de/south-america/brazil/sul-latest.osm.pbf",
     "day": 11
@@ -1377,5 +1372,155 @@
     "url": "https://download.geofabrik.de/south-america/brazil/sudeste-latest.osm.pbf",
     "day": 18,
     "clip": "-45.5,-90,180,90"
+  },
+  {
+    "name": "norte-w75-s15",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 5,
+    "clip": "-75,-15,-70,-10"
+  },
+  {
+    "name": "norte-w75-s10",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 28,
+    "clip": "-75,-10,-70,-5"
+  },
+  {
+    "name": "norte-w75-s5",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 26,
+    "clip": "-75,-5,-70,0"
+  },
+  {
+    "name": "norte-w75-n0",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 6,
+    "clip": "-75,0,-70,6"
+  },
+  {
+    "name": "norte-w70-s15",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 20,
+    "clip": "-70,-15,-65,-10"
+  },
+  {
+    "name": "norte-w70-s10",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 15,
+    "clip": "-70,-10,-65,-5"
+  },
+  {
+    "name": "norte-w70-s5",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 3,
+    "clip": "-70,-5,-65,0"
+  },
+  {
+    "name": "norte-w70-n0",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 11,
+    "clip": "-70,0,-65,6"
+  },
+  {
+    "name": "norte-w65-s15",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 14,
+    "clip": "-65,-15,-60,-10"
+  },
+  {
+    "name": "norte-w65-s10",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 9,
+    "clip": "-65,-10,-60,-5"
+  },
+  {
+    "name": "norte-w65-s5",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 1,
+    "clip": "-65,-5,-60,0"
+  },
+  {
+    "name": "norte-w65-n0",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 9,
+    "clip": "-65,0,-60,6"
+  },
+  {
+    "name": "norte-w60-s15",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 1,
+    "clip": "-60,-15,-55,-10"
+  },
+  {
+    "name": "norte-w60-s10",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 24,
+    "clip": "-60,-10,-55,-5"
+  },
+  {
+    "name": "norte-w60-s5",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 6,
+    "clip": "-60,-5,-55,0"
+  },
+  {
+    "name": "norte-w60-n0",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 14,
+    "clip": "-60,0,-55,6"
+  },
+  {
+    "name": "norte-w55-s15",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 23,
+    "clip": "-55,-15,-50,-10"
+  },
+  {
+    "name": "norte-w55-s10",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 18,
+    "clip": "-55,-10,-50,-5"
+  },
+  {
+    "name": "norte-w55-s5",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 4,
+    "clip": "-55,-5,-50,0"
+  },
+  {
+    "name": "norte-w55-n0",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 12,
+    "clip": "-55,0,-50,6"
+  },
+  {
+    "name": "norte-w50-s15",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 10,
+    "clip": "-50,-15,-45,-10"
+  },
+  {
+    "name": "norte-w50-s10",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 5,
+    "clip": "-50,-10,-45,-5"
+  },
+  {
+    "name": "norte-w50-s5",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 9,
+    "clip": "-50,-5,-45,0"
+  },
+  {
+    "name": "norte-w50-n0",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 17,
+    "clip": "-50,0,-45,6"
+  },
+  {
+    "name": "norte-w45-n0",
+    "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
+    "day": 15,
+    "clip": "-45,0,-40,6"
   }
 ]

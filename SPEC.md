@@ -84,6 +84,11 @@ region.** Implementation in `bake-slice.sh` / `tile.mjs`:
   São Paulo + Rio + Belo Horizonte, with no Geofabrik sub-extracts) bakes as
   `sudeste-west` / `sudeste-east` split at −45.5°, so each half samples DEM and writes
   tiles for half the area, though both still read the whole pbf.
+  And for an extract too big to hold: Brazil's `norte` is the Amazon, forest polygons over
+  nearly every cell of 3.85 M km², and as one slice its habitat map overflowed V8's 2^24
+  Map entries. It bakes as 25 clipped boxes (`norte-w<lng>-<s|n><lat>`, 5° wide, 5–6° tall,
+  only the boxes that touch its poly), and under a clip `tile.mjs` keeps habitat cells
+  for the clip alone — the only cells any reader of them ever used.
 
 ## 5. Diff-gated upload (keeps writes ~zero)
 

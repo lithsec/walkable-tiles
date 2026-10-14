@@ -953,7 +953,19 @@ function binLandcover(idx) {
   }
 }
 
+// Where a habitat write outside the clip lands: written to, never read, never kept.
+const HAB_OUTSIDE_CLIP = { foot: 0, res: 0, road: 0, wmask: 0, gmask: 0, amask: 0 };
+
 function habCell(cx, cy) {
+  // ⚑ UNDER A CLIP, ONLY THE CLIP'S CELLS ARE KEPT. Every reader of `hab` (featuresAt for the
+  // sidecar and atlas, the relief rectangle) already skips a cell outside the clip, because
+  // ownership is poly AND clip — so a far-side cell was memory spent on nothing. For Alaska
+  // that was waste; for Brazil's `norte` it was fatal: the Amazon's forest polygons give a
+  // landcover bit to nearly every 0.0015° cell of 3.85 M km², ~140 M entries, and the run
+  // died on V8's 2^24 Map limit (`RangeError: Map maximum size exceeded`, run 38548530626)
+  // before writing anything. Without a clip `inClip` is true and nothing here changes, so
+  // every slice baked without one hashes exactly as before.
+  if (clip && !inClip((cy + 0.5) * CELL_DEG, (cx + 0.5) * CELL_DEG)) return HAB_OUTSIDE_CLIP;
   const k = cx + ':' + cy;
   // wmask / gmask / amask: the 2x2 sample bits covered by `wood`, by `green` and by
   // `water` landcover respectively. Revision 1 kept one shared `mask`, which is the whole
