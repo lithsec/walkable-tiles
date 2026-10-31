@@ -1227,9 +1227,52 @@
     "day": 18
   },
   {
-    "name": "sweden",
+    "name": "sweden-e10-n55",
     "url": "https://download.geofabrik.de/europe/sweden-latest.osm.pbf",
-    "day": 17
+    "day": 17,
+    "clip": "10,55,15,60"
+  },
+  {
+    "name": "sweden-e15-n55",
+    "url": "https://download.geofabrik.de/europe/sweden-latest.osm.pbf",
+    "day": 17,
+    "clip": "15,55,20,60"
+  },
+  {
+    "name": "sweden-e10-n60",
+    "url": "https://download.geofabrik.de/europe/sweden-latest.osm.pbf",
+    "day": 17,
+    "clip": "10,60,15,65"
+  },
+  {
+    "name": "sweden-e15-n60",
+    "url": "https://download.geofabrik.de/europe/sweden-latest.osm.pbf",
+    "day": 17,
+    "clip": "15,60,20,65"
+  },
+  {
+    "name": "sweden-e20-n60",
+    "url": "https://download.geofabrik.de/europe/sweden-latest.osm.pbf",
+    "day": 17,
+    "clip": "20,60,25,65"
+  },
+  {
+    "name": "sweden-e10-n65",
+    "url": "https://download.geofabrik.de/europe/sweden-latest.osm.pbf",
+    "day": 17,
+    "clip": "10,65,15,70"
+  },
+  {
+    "name": "sweden-e15-n65",
+    "url": "https://download.geofabrik.de/europe/sweden-latest.osm.pbf",
+    "day": 17,
+    "clip": "15,65,20,70"
+  },
+  {
+    "name": "sweden-e20-n65",
+    "url": "https://download.geofabrik.de/europe/sweden-latest.osm.pbf",
+    "day": 17,
+    "clip": "20,65,25,70"
   },
   {
     "name": "swietokrzyskie",
@@ -1257,9 +1300,64 @@
     "day": 12
   },
   {
-    "name": "ukraine",
+    "name": "ukraine-e30-n40",
     "url": "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf",
-    "day": 24
+    "day": 24,
+    "clip": "30,40,35,45"
+  },
+  {
+    "name": "ukraine-e20-n45",
+    "url": "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf",
+    "day": 24,
+    "clip": "20,45,25,50"
+  },
+  {
+    "name": "ukraine-e25-n45",
+    "url": "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf",
+    "day": 24,
+    "clip": "25,45,30,50"
+  },
+  {
+    "name": "ukraine-e30-n45",
+    "url": "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf",
+    "day": 24,
+    "clip": "30,45,35,50"
+  },
+  {
+    "name": "ukraine-e35-n45",
+    "url": "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf",
+    "day": 24,
+    "clip": "35,45,40,50"
+  },
+  {
+    "name": "ukraine-e40-n45",
+    "url": "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf",
+    "day": 24,
+    "clip": "40,45,45,50"
+  },
+  {
+    "name": "ukraine-e20-n50",
+    "url": "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf",
+    "day": 24,
+    "clip": "20,50,25,55"
+  },
+  {
+    "name": "ukraine-e25-n50",
+    "url": "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf",
+    "day": 24,
+    "clip": "25,50,30,55"
+  },
+  {
+    "name": "ukraine-e30-n50",
+    "url": "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf",
+    "day": 24,
+    "clip": "30,50,35,55"
+  },
+  {
+    "name": "ukraine-e35-n50",
+    "url": "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf",
+    "day": 24,
+    "clip": "35,50,40,55"
   },
   {
     "name": "unterfranken",
