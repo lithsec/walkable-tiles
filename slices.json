@@ -1620,5 +1620,638 @@
     "url": "https://download.geofabrik.de/south-america/brazil/norte-latest.osm.pbf",
     "day": 15,
     "clip": "-45,0,-40,6"
+  },
+  {
+    "name": "ontario-w85-n40",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-85,40,-80,45"
+  },
+  {
+    "name": "ontario-w80-n40",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-80,40,-75,45"
+  },
+  {
+    "name": "ontario-w95-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-95,45,-90,50"
+  },
+  {
+    "name": "ontario-w90-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-90,45,-85,50"
+  },
+  {
+    "name": "ontario-w85-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-85,45,-80,50"
+  },
+  {
+    "name": "ontario-w80-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-80,45,-75,50"
+  },
+  {
+    "name": "ontario-w75-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-75,45,-70,50"
+  },
+  {
+    "name": "ontario-w95-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-95,50,-90,55"
+  },
+  {
+    "name": "ontario-w90-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-90,50,-85,55"
+  },
+  {
+    "name": "ontario-w85-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-85,50,-80,55"
+  },
+  {
+    "name": "ontario-w80-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-80,50,-75,55"
+  },
+  {
+    "name": "ontario-w90-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-90,55,-85,60"
+  },
+  {
+    "name": "ontario-w85-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/ontario-latest.osm.pbf",
+    "day": 9,
+    "clip": "-85,55,-80,60"
+  },
+  {
+    "name": "quebec-w80-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-80,45,-75,50"
+  },
+  {
+    "name": "quebec-w75-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-75,45,-70,50"
+  },
+  {
+    "name": "quebec-w70-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-70,45,-65,50"
+  },
+  {
+    "name": "quebec-w65-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-65,45,-60,50"
+  },
+  {
+    "name": "quebec-w60-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-60,45,-55,50"
+  },
+  {
+    "name": "quebec-w80-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-80,50,-75,55"
+  },
+  {
+    "name": "quebec-w75-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-75,50,-70,55"
+  },
+  {
+    "name": "quebec-w70-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-70,50,-65,55"
+  },
+  {
+    "name": "quebec-w65-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-65,50,-60,55"
+  },
+  {
+    "name": "quebec-w60-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-60,50,-55,55"
+  },
+  {
+    "name": "quebec-w80-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-80,55,-75,60"
+  },
+  {
+    "name": "quebec-w75-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-75,55,-70,60"
+  },
+  {
+    "name": "quebec-w70-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-70,55,-65,60"
+  },
+  {
+    "name": "quebec-w65-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-65,55,-60,60"
+  },
+  {
+    "name": "quebec-w80-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-80,60,-75,65"
+  },
+  {
+    "name": "quebec-w75-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-75,60,-70,65"
+  },
+  {
+    "name": "quebec-w70-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/quebec-latest.osm.pbf",
+    "day": 12,
+    "clip": "-70,60,-65,65"
+  },
+  {
+    "name": "british-columbia-w130-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-130,45,-125,50"
+  },
+  {
+    "name": "british-columbia-w125-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-125,45,-120,50"
+  },
+  {
+    "name": "british-columbia-w120-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-120,45,-115,50"
+  },
+  {
+    "name": "british-columbia-w115-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-115,45,-110,50"
+  },
+  {
+    "name": "british-columbia-w135-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-135,50,-130,55"
+  },
+  {
+    "name": "british-columbia-w130-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-130,50,-125,55"
+  },
+  {
+    "name": "british-columbia-w125-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-125,50,-120,55"
+  },
+  {
+    "name": "british-columbia-w120-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-120,50,-115,55"
+  },
+  {
+    "name": "british-columbia-w115-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-115,50,-110,55"
+  },
+  {
+    "name": "british-columbia-w135-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-135,55,-130,60"
+  },
+  {
+    "name": "british-columbia-w130-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-130,55,-125,60"
+  },
+  {
+    "name": "british-columbia-w125-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-125,55,-120,60"
+  },
+  {
+    "name": "british-columbia-w120-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/british-columbia-latest.osm.pbf",
+    "day": 9,
+    "clip": "-120,55,-115,60"
+  },
+  {
+    "name": "alberta-w120-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/alberta-latest.osm.pbf",
+    "day": 10,
+    "clip": "-120,45,-115,50"
+  },
+  {
+    "name": "alberta-w115-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/alberta-latest.osm.pbf",
+    "day": 10,
+    "clip": "-115,45,-110,50"
+  },
+  {
+    "name": "alberta-w120-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/alberta-latest.osm.pbf",
+    "day": 10,
+    "clip": "-120,50,-115,55"
+  },
+  {
+    "name": "alberta-w115-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/alberta-latest.osm.pbf",
+    "day": 10,
+    "clip": "-115,50,-110,55"
+  },
+  {
+    "name": "alberta-w120-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/alberta-latest.osm.pbf",
+    "day": 10,
+    "clip": "-120,55,-115,60"
+  },
+  {
+    "name": "alberta-w115-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/alberta-latest.osm.pbf",
+    "day": 10,
+    "clip": "-115,55,-110,60"
+  },
+  {
+    "name": "saskatchewan-w110-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/saskatchewan-latest.osm.pbf",
+    "day": 2,
+    "clip": "-110,45,-105,50"
+  },
+  {
+    "name": "saskatchewan-w105-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/saskatchewan-latest.osm.pbf",
+    "day": 2,
+    "clip": "-105,45,-100,50"
+  },
+  {
+    "name": "saskatchewan-w110-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/saskatchewan-latest.osm.pbf",
+    "day": 2,
+    "clip": "-110,50,-105,55"
+  },
+  {
+    "name": "saskatchewan-w105-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/saskatchewan-latest.osm.pbf",
+    "day": 2,
+    "clip": "-105,50,-100,55"
+  },
+  {
+    "name": "saskatchewan-w110-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/saskatchewan-latest.osm.pbf",
+    "day": 2,
+    "clip": "-110,55,-105,60"
+  },
+  {
+    "name": "saskatchewan-w105-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/saskatchewan-latest.osm.pbf",
+    "day": 2,
+    "clip": "-105,55,-100,60"
+  },
+  {
+    "name": "manitoba-w105-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/manitoba-latest.osm.pbf",
+    "day": 10,
+    "clip": "-105,45,-100,50"
+  },
+  {
+    "name": "manitoba-w100-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/manitoba-latest.osm.pbf",
+    "day": 10,
+    "clip": "-100,45,-95,50"
+  },
+  {
+    "name": "manitoba-w95-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/manitoba-latest.osm.pbf",
+    "day": 10,
+    "clip": "-95,45,-90,50"
+  },
+  {
+    "name": "manitoba-w105-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/manitoba-latest.osm.pbf",
+    "day": 10,
+    "clip": "-105,50,-100,55"
+  },
+  {
+    "name": "manitoba-w100-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/manitoba-latest.osm.pbf",
+    "day": 10,
+    "clip": "-100,50,-95,55"
+  },
+  {
+    "name": "manitoba-w95-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/manitoba-latest.osm.pbf",
+    "day": 10,
+    "clip": "-95,50,-90,55"
+  },
+  {
+    "name": "manitoba-w90-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/manitoba-latest.osm.pbf",
+    "day": 10,
+    "clip": "-90,50,-85,55"
+  },
+  {
+    "name": "manitoba-w100-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/manitoba-latest.osm.pbf",
+    "day": 10,
+    "clip": "-100,55,-95,60"
+  },
+  {
+    "name": "manitoba-w95-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/manitoba-latest.osm.pbf",
+    "day": 10,
+    "clip": "-95,55,-90,60"
+  },
+  {
+    "name": "newfoundland-and-labrador-w60-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/newfoundland-and-labrador-latest.osm.pbf",
+    "day": 10,
+    "clip": "-60,45,-55,50"
+  },
+  {
+    "name": "newfoundland-and-labrador-w55-n45",
+    "url": "https://download.geofabrik.de/north-america/canada/newfoundland-and-labrador-latest.osm.pbf",
+    "day": 10,
+    "clip": "-55,45,-50,50"
+  },
+  {
+    "name": "newfoundland-and-labrador-w60-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/newfoundland-and-labrador-latest.osm.pbf",
+    "day": 10,
+    "clip": "-60,50,-55,55"
+  },
+  {
+    "name": "newfoundland-and-labrador-w55-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/newfoundland-and-labrador-latest.osm.pbf",
+    "day": 10,
+    "clip": "-55,50,-50,55"
+  },
+  {
+    "name": "newfoundland-and-labrador-w70-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/newfoundland-and-labrador-latest.osm.pbf",
+    "day": 10,
+    "clip": "-70,50,-65,55"
+  },
+  {
+    "name": "newfoundland-and-labrador-w65-n50",
+    "url": "https://download.geofabrik.de/north-america/canada/newfoundland-and-labrador-latest.osm.pbf",
+    "day": 10,
+    "clip": "-65,50,-60,55"
+  },
+  {
+    "name": "newfoundland-and-labrador-w65-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/newfoundland-and-labrador-latest.osm.pbf",
+    "day": 10,
+    "clip": "-65,55,-60,60"
+  },
+  {
+    "name": "newfoundland-and-labrador-w60-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/newfoundland-and-labrador-latest.osm.pbf",
+    "day": 10,
+    "clip": "-60,55,-55,60"
+  },
+  {
+    "name": "yukon-w140-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/yukon-latest.osm.pbf",
+    "day": 3,
+    "clip": "-140,60,-135,65"
+  },
+  {
+    "name": "yukon-w135-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/yukon-latest.osm.pbf",
+    "day": 3,
+    "clip": "-135,60,-130,65"
+  },
+  {
+    "name": "yukon-w130-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/yukon-latest.osm.pbf",
+    "day": 3,
+    "clip": "-130,60,-125,65"
+  },
+  {
+    "name": "yukon-w140-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/yukon-latest.osm.pbf",
+    "day": 3,
+    "clip": "-140,65,-135,70"
+  },
+  {
+    "name": "yukon-w135-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/yukon-latest.osm.pbf",
+    "day": 3,
+    "clip": "-135,65,-130,70"
+  },
+  {
+    "name": "northwest-territories-w130-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-130,60,-125,65"
+  },
+  {
+    "name": "northwest-territories-w125-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-125,60,-120,65"
+  },
+  {
+    "name": "northwest-territories-w120-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-120,60,-115,65"
+  },
+  {
+    "name": "northwest-territories-w115-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-115,60,-110,65"
+  },
+  {
+    "name": "northwest-territories-w110-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-110,60,-105,65"
+  },
+  {
+    "name": "northwest-territories-w135-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-135,65,-130,70"
+  },
+  {
+    "name": "northwest-territories-w130-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-130,65,-125,70"
+  },
+  {
+    "name": "northwest-territories-w125-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-125,65,-120,70"
+  },
+  {
+    "name": "northwest-territories-w120-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-120,65,-115,70"
+  },
+  {
+    "name": "northwest-territories-w115-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-115,65,-110,70"
+  },
+  {
+    "name": "northwest-territories-w130-n70",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-130,70,-125,75"
+  },
+  {
+    "name": "northwest-territories-w120-n70",
+    "url": "https://download.geofabrik.de/north-america/canada/northwest-territories-latest.osm.pbf",
+    "day": 16,
+    "clip": "-120,70,-115,75"
+  },
+  {
+    "name": "nunavut-w90-n55",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-90,55,-80,60"
+  },
+  {
+    "name": "nunavut-w100-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-100,60,-90,65"
+  },
+  {
+    "name": "nunavut-w90-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-90,60,-80,65"
+  },
+  {
+    "name": "nunavut-w80-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-80,60,-70,65"
+  },
+  {
+    "name": "nunavut-w70-n60",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-70,60,-60,65"
+  },
+  {
+    "name": "nunavut-w120-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-120,65,-110,70"
+  },
+  {
+    "name": "nunavut-w110-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-110,65,-100,70"
+  },
+  {
+    "name": "nunavut-w100-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-100,65,-90,70"
+  },
+  {
+    "name": "nunavut-w90-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-90,65,-80,70"
+  },
+  {
+    "name": "nunavut-w70-n65",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-70,65,-60,70"
+  },
+  {
+    "name": "nunavut-w100-n70",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-100,70,-90,75"
+  },
+  {
+    "name": "nunavut-w90-n70",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-90,70,-80,75"
+  },
+  {
+    "name": "nunavut-w80-n70",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-80,70,-70,75"
+  },
+  {
+    "name": "nunavut-w70-n70",
+    "url": "https://download.geofabrik.de/north-america/canada/nunavut-latest.osm.pbf",
+    "day": 12,
+    "clip": "-70,70,-60,75"
+  },
+  {
+    "name": "new-brunswick",
+    "url": "https://download.geofabrik.de/north-america/canada/new-brunswick-latest.osm.pbf",
+    "day": 4
+  },
+  {
+    "name": "nova-scotia",
+    "url": "https://download.geofabrik.de/north-america/canada/nova-scotia-latest.osm.pbf",
+    "day": 3
+  },
+  {
+    "name": "prince-edward-island",
+    "url": "https://download.geofabrik.de/north-america/canada/prince-edward-island-latest.osm.pbf",
+    "day": 20
   }
 ]
