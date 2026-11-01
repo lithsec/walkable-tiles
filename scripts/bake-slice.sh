@@ -286,6 +286,13 @@ export AWS_ENDPOINT_URL="$EP"
 # per object.
 export AWS_MAX_CONCURRENT_REQUESTS="${R2_CONCURRENCY:-128}"
 aws() { command aws --endpoint-url "$EP" "$@"; }
+# Archives are one large object each, and R2 has lost parts of them: CompleteMultipartUpload
+# answered `InvalidPart: one or more of the specified parts could not be found` on 3 of 18
+# cells in run 41252396900 and 12 of 64 in 41223142710, always on the big .wta, never on a
+# sidecar. The CLI default is 8 MB parts, so a 400 MB archive is 50 parts in flight at once
+# per process; 64 MB parts cut that to ~7, and the archive copy below also runs with its own
+# low in-flight ceiling. Bigger parts change nothing about the bytes or the key.
+aws configure set default.s3.multipart_chunksize 64MB
 
 # ══════════════════════════════════════════════════════════════════════════════════════
 # PUBLISHING AN ARCHIVE, AND WHAT "CHANGED" MEANS NOW
@@ -409,10 +416,20 @@ publish_archive() {
 
     # `immutable` is honest here and nowhere else in this script: the key contains the digest
     # of the bytes, so this object can never change.
-    aws s3 cp "$ARC" "s3://$R2_BUCKET/$ARCPATH" \
-      --content-type application/octet-stream \
-      --cache-control "public, max-age=31536000, immutable" \
-      --only-show-errors
+    # Three tries, few parts in flight: a lost part fails the whole multipart upload, and a
+    # retry is a fresh upload under a fresh upload id — nothing of the failed one is reused.
+    local TRY
+    for TRY in 1 2 3; do
+      if AWS_MAX_CONCURRENT_REQUESTS=4 aws s3 cp "$ARC" "s3://$R2_BUCKET/$ARCPATH" \
+          --content-type application/octet-stream \
+          --cache-control "public, max-age=31536000, immutable" \
+          --only-show-errors; then
+        break
+      fi
+      if [ "$TRY" = 3 ]; then echo "[$NAME] $VER: archive upload failed three times" >&2; exit 1; fi
+      echo "[$NAME] $VER: archive upload failed (try $TRY), retrying" >&2
+      sleep $((TRY * 20))
+    done
 
     # SHORT-lived at the edge: the sidecar is how a republish becomes visible.
     aws s3 cp "$IDX" "s3://$R2_BUCKET/$VER/archive/$SNAME.idx.json" \
