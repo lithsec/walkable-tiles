@@ -100,7 +100,9 @@ npx wrangler secret put TILES_TOKEN
 Verify after routing:
 
 ```sh
-# a July legacy cell — must still be a 200, x-tiles-source: object
+# a covered cell that ALSO has a July object — the archive wins:
+#   → 200, x-tiles-source: archive <slice>-<sha12>
+#   (legacy-first froze those cells at July while fresh bakes went unread)
 curl -sI -H 'accept-encoding: gzip' https://tiles.walktiles.xyz/v4/4236/-7107.json.gz
 # an archive-resolved cell (any covered cell with no per-cell object)
 #   → 200, x-tiles-source: archive <slice>-<sha12>

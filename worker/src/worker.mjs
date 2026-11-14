@@ -226,12 +226,25 @@ async function passthrough(request, env, pathname) {
   return new Response(obj.body, init);
 }
 
-/** A per-cell tile URL: legacy object first, then archive resolution. */
+/** A per-cell tile URL: archive resolution first, the July legacy object only for a cell
+ *  no archive covers (or when the archive layer errors).
+ *
+ *  This used to be the other way round, and it froze the map: every cell that had a July
+ *  object kept serving July — no `access`, no `surface`, no OSM edit since — while each
+ *  monthly bake published fresh archives underneath that nothing ever read. A HOLE stays a
+ *  404 on purpose: the fresh bake saying "empty" outranks a stale object saying otherwise. */
 async function serveTile(request, env, ctx, cell) {
+  const archived = await serveArchived(env, ctx, cell);
+  if (archived.status === 200 || archived.headers.get('x-tiles-status') === 'hole') return archived;
+  const legacy = await serveLegacy(env, ctx, cell);
+  return legacy ?? archived;
+}
+
+/** The literal per-cell object, or null when there is none. */
+async function serveLegacy(env, ctx, cell) {
   const { version, i, j } = cell;
   const cache = caches.default;
 
-  // ── 2a. the literal object — July legacy cells must keep working ──────────────────
   // Cached under the plain path so repeat hits in a colo stop paying a Class-B read,
   // exactly what the edge cache did for the bare custom domain.
   const legacyKey = new Request(`https://wta-internal/obj/${version}/${i}/${j}.json.gz`);
@@ -253,7 +266,13 @@ async function serveTile(request, env, ctx, cell) {
     );
     return tileResponse(bytes, { 'x-tiles-source': 'object' });
   }
+  return null;
+}
 
+/** Archive resolution (SPEC §11): the tile from the newest published generation. */
+async function serveArchived(env, ctx, cell) {
+  const { version, i, j } = cell;
+  const cache = caches.default;
   // ── 2b. archive resolution ────────────────────────────────────────────────────────
   let index;
   try {
