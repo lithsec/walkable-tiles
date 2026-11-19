@@ -20,3 +20,16 @@ therefore itself licensed under ODbL 1.0. See DATA-LICENSE.md for details.
 
 The Apache License covers only the *code* in this repository. It does NOT and
 cannot relicense the OpenStreetMap-derived tile data, which remains under ODbL.
+
+--------------------------------------------------------------------------------
+Elevation (v5 tiles, NOT covered by the Apache License above)
+--------------------------------------------------------------------------------
+
+The v5 habitat relief values are derived from the Copernicus DEM GLO-30:
+
+  produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and
+  © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS
+  by the European Union and ESA; all rights reserved
+
+Used under the ESA licence for Copernicus DEM public data:
+  https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM

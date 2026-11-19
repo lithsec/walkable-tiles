@@ -29,6 +29,19 @@ neither is optional:
    use, copy, and adapt the tiles under the same license, and any publicly-used
    adaptation of the *database* must likewise be shared under ODbL.
 
+## Elevation (v5 only)
+
+The v5 `habitat` relief values (SPEC.md §10.3, §10.9) are derived from the
+**Copernicus DEM GLO-30**, read from AWS Open Data. They are adapted data, so
+any product that redistributes v5 tiles must carry this notice:
+
+> produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus
+> Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European
+> Union and ESA; all rights reserved
+
+Licence: [ESA licence for Copernicus DEM public data](https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM).
+v4 tiles contain no elevation data.
+
 ## Scope — code vs. data
 
 | Artifact | License |
